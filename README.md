@@ -10,10 +10,12 @@
   <b>轻巧易用，一线畅联，基于 NVENC + 有线 ADB 的 Windows 低延迟高刷安卓副屏</b>
 </p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20Android%2010%2B-informational.svg)]()
-[![C++20](https://img.shields.io/badge/Host-C%2B%2B20%20%7C%20WGC%20%7C%20NVENC-success.svg)]()
-[![Electron](https://img.shields.io/badge/GUI-Material%20Design%203-blueviolet.svg)]()
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows | Android 10+-blue?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/badge/Host-C%2B%2B20%20%7C%20WGC%20%7C%20NVENC-success?style=flat-square" alt="Electron" />
+  <img src="https://img.shields.io/badge/Design-Material_Design_3-blueviolet?style=flat-square" alt="MD3" />
+  <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" />
+</p>
 
 ReDisplay 是一套开源、全链路硬件加速的超低延迟有线副屏拓展系统。基于高速 USB 3.2 Type-C ，将安卓设备无缝接入 Windows ，作为原生高刷新率副屏。
 
