@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ReDisplay - 超低延迟有线副屏系统</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self';">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto+Mono:wght@400;500;600&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="md3-dark">
+    <!-- Custom Frameless Titlebar -->
+    <header class="titlebar">
+        <div class="titlebar-left">
+            <div class="app-logo">
+                <img src="../assets/icon.png" width="22" height="22" style="border-radius: 5px; display: block;" alt="ReDisplay">
+            </div>
+            <span class="app-title">ReDisplay</span>
+            <span class="version-tag">v2.0 Pro</span>
+            <div id="status-pill" class="status-badge status-idle">
+                <span class="badge-dot"></span>
+                <span id="status-text">待机就绪</span>
+            </div>
+        </div>
+        <div class="titlebar-drag-region"></div>
+        <div class="titlebar-controls">
+            <button id="btn-tray-min" class="titlebar-btn" title="隐藏至系统托盘">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                </svg>
+            </button>
+            <button id="btn-minimize" class="titlebar-btn" title="最小化">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <path d="M19 13H5v-2h14v2z"/>
+                </svg>
+            </button>
+            <button id="btn-maximize" class="titlebar-btn" title="最大化">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                    <path d="M4 4h16v16H4V4zm2 2v12h12V6H6z"/>
+                </svg>
+            </button>
+            <button id="btn-close" class="titlebar-btn titlebar-btn-close" title="最小化到托盘">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content Container -->
+    <main class="main-container">
+        <!-- Floating Reconfiguration Confirmation Banner -->
+        <div id="reconfig-confirm-banner" class="reconfig-banner hidden">
+            <div class="reconfig-content">
+                <div class="reconfig-icon-circle">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                    </svg>
+                </div>
+                <div class="reconfig-text-group">
+                    <div class="reconfig-title">已应用新设置并热重启串流</div>
+                    <div class="reconfig-desc">请确认画面是否正常显示，超时将自动回退先前设置。</div>
+                </div>
+            </div>
+            <div class="reconfig-actions">
+                <button id="btn-reconfig-keep" class="banner-btn banner-btn-keep">保留更改</button>
+                <button id="btn-reconfig-revert" class="banner-btn banner-btn-revert">还原 (<span id="reconfig-countdown">10</span>s)</button>
+            </div>
+        </div>
+
+        <!-- Telemetry Cards Hero Grid -->
+        <section class="telemetry-grid">
+            <div class="md3-card stat-card">
+                <div class="stat-header">
+                    <span class="stat-label">实时帧率</span>
+                    <span class="stat-badge" id="card-fps-target">120 Hz</span>
+                </div>
+                <div class="stat-value-row">
+                    <span class="stat-value" id="stat-fps">0.0</span>
+                    <span class="stat-unit">FPS</span>
+                </div>
+                <div class="stat-footer">
+                    <span class="stat-subtext" id="stat-fps-desc">Windows DWM 直通</span>
+                </div>
+            </div>
+
+            <div class="md3-card stat-card">
+                <div class="stat-header">
+                    <span class="stat-label">传输码率与链路</span>
+                    <span class="stat-badge" id="badge-usb-tier">USB 3.2</span>
+                </div>
+                <div class="stat-value-row">
+                    <span class="stat-value" id="stat-bitrate">0.0</span>
+                    <span class="stat-unit">Mbps</span>
+                </div>
+                <div class="stat-footer">
+                    <span class="stat-subtext" id="stat-usb-desc">USB 链路检测中...</span>
+                </div>
+            </div>
+
+            <div class="md3-card stat-card">
+                <div class="stat-header">
+                    <span class="stat-label">硬件编码耗时</span>
+                    <span class="stat-badge" id="badge-encoder-proto">NVENC H.264</span>
+                </div>
+                <div class="stat-value-row">
+                    <span class="stat-value" id="stat-latency">0.0</span>
+                    <span class="stat-unit">ms</span>
+                </div>
+                <div class="stat-footer">
+                    <span class="stat-subtext" id="stat-gpu-desc">独立显卡</span>
+                </div>
+            </div>
+
+            <div class="md3-card stat-card">
+                <div class="stat-header">
+                    <span class="stat-label">传输协议与帧数</span>
+                    <span class="stat-badge" id="badge-drop-rate">丢帧率 0.0%</span>
+                </div>
+                <div class="stat-value-row">
+                    <span class="stat-value" id="stat-frames">0</span>
+                    <span class="stat-unit">帧</span>
+                </div>
+                <div class="stat-footer">
+                    <span class="stat-subtext" id="stat-proto-desc">ADB 隧道 · TCP 直连 (27183)</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Unified System Status Bar -->
+        <section class="system-status-bar">
+            <div class="status-cell" id="cell-device">
+                <span class="status-dot status-dot-offline" id="dot-device"></span>
+                <span class="status-cell-label">设备</span>
+                <span class="status-cell-val" id="val-device">未连接设备</span>
+            </div>
+            <div class="status-cell-divider"></div>
+            <div class="status-cell" id="cell-apk">
+                <span class="status-dot status-dot-offline" id="dot-apk"></span>
+                <span class="status-cell-label">客户端</span>
+                <span class="status-cell-val" id="val-apk">检查中...</span>
+                <button id="btn-status-apk" class="status-cell-btn hidden" title="一键安装 ReDisplay.apk">安装</button>
+            </div>
+            <div class="status-cell-divider"></div>
+            <div class="status-cell" id="cell-display">
+                <span class="status-dot status-dot-online" id="dot-display"></span>
+                <span class="status-cell-label">虚拟副屏</span>
+                <span class="status-cell-val" id="val-display">检测中...</span>
+            </div>
+            <div class="status-cell-divider"></div>
+            <div class="status-cell" id="cell-driver">
+                <span class="status-dot status-dot-online" id="dot-driver"></span>
+                <span class="status-cell-label">IddCx驱动</span>
+                <span class="status-cell-val" id="val-driver">已就绪</span>
+                <button id="btn-status-driver" class="status-cell-btn hidden" title="安装/修复虚拟显示器驱动">安装</button>
+            </div>
+        </section>
+
+        <!-- Configuration Grid -->
+        <div class="config-grid">
+            <!-- Left Panel: Device & Display Selection -->
+            <section class="md3-card config-card">
+                <div class="card-title-row">
+                    <h2 class="card-title">设备与显示拓扑</h2>
+                    <span class="card-subtitle">支持任意安卓平板/手机与 Windows 虚拟副屏联动</span>
+                </div>
+
+                <!-- Device Selector -->
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="select-device">目标安卓设备</label>
+                        <div class="btn-group-inline">
+                            <button id="btn-refresh-devices" class="text-btn" title="重新扫描 ADB 设备">刷新</button>
+                            <button id="btn-test-usb" class="text-btn text-btn-highlight" title="测试 USB 真实传输带宽">测速</button>
+                        </div>
+                    </div>
+                    <select id="select-device" class="md3-select">
+                        <option value="">正在检测 ADB 设备...</option>
+                    </select>
+                </div>
+
+                <!-- Display Selector -->
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="select-display">Windows 捕获显示器</label>
+                        <div class="btn-group-inline">
+                            <button id="btn-refresh-displays" class="text-btn" title="重新枚举显示器">刷新</button>
+                            <button id="btn-win-display" class="text-btn" title="打开 Windows 显示设置">显示设置</button>
+                        </div>
+                    </div>
+                    <select id="select-display" class="md3-select">
+                        <option value="-1">自动选择 (优先虚拟副屏 Virtual Display)</option>
+                    </select>
+                </div>
+
+                <!-- Generic Resolution & Display Orientation Selector -->
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="select-resolution">副屏分辨率与方向</label>
+                        <span class="preset-mode-tag" id="val-resolution-ratio">16:10 纵向竖屏</span>
+                    </div>
+                    <select id="select-resolution" class="md3-select">
+                        <option value="1752x2800" selected>1752 × 2800 (2.8K 竖屏)</option>
+                        <option value="2800x1752">2800 × 1752 (2.8K 横屏)</option>
+                        <option value="1600x2560">1600 × 2560 (2.5K 竖屏)</option>
+                        <option value="2560x1600">2560 × 1600 (2.5K 横屏)</option>
+                        <option value="1200x1920">1200 × 1920 (2K 竖屏)</option>
+                        <option value="1920x1200">1920 × 1200 (2K 横屏)</option>
+                        <option value="1080x1920">1080 × 1920 (1080P 竖屏)</option>
+                        <option value="1920x1080">1920 × 1080 (1080P 横屏)</option>
+                    </select>
+                </div>
+
+                <!-- Switch: Auto-reconnect & Persistence -->
+                <div class="switch-row">
+                    <div class="switch-info">
+                        <span class="switch-title">后台常驻 & 自动重连</span>
+                        <span class="switch-desc">插拔数据线或设备亮屏时自动探测并秒级恢复串流</span>
+                    </div>
+                    <label class="md3-switch">
+                        <input type="checkbox" id="switch-autoreconnect" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </section>
+
+            <!-- Right Panel: Performance & Encoder Settings -->
+            <section class="md3-card config-card">
+                <div class="card-title-row">
+                    <h2 class="card-title">编码与性能调优</h2>
+                    <span class="card-subtitle">自适应设备高刷屏，毫秒级极速直推</span>
+                </div>
+
+                <!-- Standardized Performance Profiles (Gear Selection) -->
+                <div class="form-group">
+                    <div class="label-row">
+                        <label>性能预设档位</label>
+                        <span class="preset-mode-tag" id="val-profile-tag">120Hz 极速电竞直通</span>
+                    </div>
+                    <div class="segmented-control" id="seg-profile">
+                        <button class="seg-btn active" data-profile="esports" title="120Hz 高刷新率 · 60Mbps 码率 · ≤10ms 极低延迟直通">⚡ 极速直通</button>
+                        <button class="seg-btn" data-profile="quality" title="120Hz 高刷新率 · 85Mbps 超高码率 · 点对点极致超清">🎬 极致超清</button>
+                        <button class="seg-btn" data-profile="office" title="60Hz 标准刷新率 · 30Mbps 码率 · 节能平滑办公">🔋 节能办公</button>
+                        <button class="seg-btn" data-profile="custom" title="手动微调下方刷新率、码率与延迟策略">🛠️ 自定义</button>
+                    </div>
+                </div>
+
+                <!-- Refresh Rate Segmented Control -->
+                <div class="form-group">
+                    <label>串流刷新率 (Hz)</label>
+                    <div class="segmented-control" id="seg-fps">
+                        <button class="seg-btn" data-fps="60">60 Hz</button>
+                        <button class="seg-btn" data-fps="90">90 Hz</button>
+                        <button class="seg-btn active" data-fps="120">120 Hz <span class="badge-mini">推荐</span></button>
+                        <button class="seg-btn" data-fps="144">144 Hz</button>
+                    </div>
+                </div>
+
+                <!-- Bitrate Slider -->
+                <div class="form-group">
+                    <div class="label-row">
+                        <label for="slider-bitrate">传输码率</label>
+                        <span class="slider-val" id="val-bitrate">60 Mbps</span>
+                    </div>
+                    <input type="range" id="slider-bitrate" class="md3-slider" min="20" max="100" step="5" value="60">
+                    <div class="slider-presets">
+                        <span class="preset-tag" data-val="30">30M (节能)</span>
+                        <span class="preset-tag active-tag" data-val="60">60M (电竞)</span>
+                        <span class="preset-tag" data-val="85">85M (超清)</span>
+                        <span class="preset-tag" data-val="100">100M (极致)</span>
+                    </div>
+                </div>
+
+                <!-- Latency Buffer Mode -->
+                <div class="form-group">
+                    <label>延迟控制策略 (Ring Buffer)</label>
+                    <div class="segmented-control" id="seg-buffermode">
+                        <button class="seg-btn active" data-mode="lowlatency">⚡ 丢帧保最新 (≤10ms 极低延迟)</button>
+                        <button class="seg-btn" data-mode="smooth">🎬 平滑优先 (防掉帧)</button>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Bottom Actions Bar -->
+        <section class="action-bar">
+            <button id="btn-toggle-stream" class="md3-fab md3-fab-primary">
+                <svg id="icon-stream" viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+                    <path d="M8 5v14l11-7z"/>
+                </svg>
+                <span id="text-stream">启动副屏服务</span>
+            </button>
+
+            <button id="btn-hide-tray" class="md3-btn md3-btn-tonal" title="将界面隐藏到托盘后台">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                    <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                </svg>
+                最小化至托盘
+            </button>
+
+            <button id="btn-toggle-log" class="md3-btn md3-btn-outlined" title="展开实时日志">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                    <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
+                </svg>
+                运行日志
+            </button>
+        </section>
+
+        <!-- Collapsible Log Console Drawer -->
+        <section id="log-drawer" class="log-drawer collapsed">
+            <div class="log-header">
+                <span class="log-title">ReDisplay 运行日志与底层事件</span>
+                <button id="btn-clear-log" class="text-btn">清空</button>
+            </div>
+            <div id="log-console" class="log-console">
+                <div class="log-line log-info">[System] ReDisplay 桌面控制中心就绪.</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "redisplay-gui",
+  "version": "1.0.0",
+  "description": "Ultra-Low Latency Wired Secondary Display System",
+  "main": "main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "redisplay",
+    "display",
+    "low-latency",
+    "android",
+    "usb",
+    "120hz"
+  ],
+  "author": "ReDisplay",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^44.4.3",
+    "rcedit": "^5.0.1"
+  }
+}
