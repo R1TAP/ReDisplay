@@ -95,9 +95,4 @@ Windows 11 + Android 16 + USB 3.2 Gen2 下：
 ## 📄 开源许可证与声明
 
 - ReDisplay 遵循 [MIT](LICENSE) 开源协议。
-
-- 第三方组件遵循各自许可证：
-  - NVIDIA NVENC
-  - Android ADB
-  - Windows.Graphics.Capture
-  - Qualcomm MediaCodec
+  - 第三方组件遵循各自许可证，详见 [NOTICE.md](NOTICE.md)。
