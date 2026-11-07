@@ -59,7 +59,7 @@ ReDisplay 是一套开源、全链路硬件加速的超低延迟有线副屏拓�
 - 访问 Releases 下载 `ReDisplay-v1.1.0-Win64.zip`，解压后双击运行 `ReDisplay.exe` 即可打开控制面板。
 - 首次运行服务需要提升的管理员身份以**安装驱动/为安卓设备推送APK**
 
-### 📊 实测数据
+## 📊 实测数据
 
 Windows 11 + Android 16 + USB 3.2 Gen2 下：
 
