@@ -1,936 +1,730 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // Window Controls
-    const btnTrayMin = document.getElementById('btn-tray-min');
-    const btnMinimize = document.getElementById('btn-minimize');
-    const btnMaximize = document.getElementById('btn-maximize');
-    const btnClose = document.getElementById('btn-close');
+(() => {
+    'use strict';
 
-    // Status Pill
-    const statusPill = document.getElementById('status-pill');
-    const statusText = document.getElementById('status-text');
+    const api = window.api;
+    const { translate } = window.ReDisplayI18n;
+    const swatches = [...document.querySelectorAll('[data-palette]')];
+    const labels = new Map();
+    const optionLabels = new WeakMap();
+    const preferences = { language: 'zh-CN', theme: 'system', palette: 'lavender' };
+    try {
+        const saved = JSON.parse(localStorage.getItem('preferences') || '{}');
+        if (['zh-CN', 'en'].includes(saved?.language)) preferences.language = saved.language;
+        if (['system', 'light', 'dark'].includes(saved?.theme)) preferences.theme = saved.theme;
+        if (swatches.some(button => button.dataset.palette === saved?.palette)) preferences.palette = saved.palette;
+    } catch {
+        // Use defaults if saved preferences cannot be read.
+    }
 
-    // Telemetry Hero Card Elements
-    const statFps = document.getElementById('stat-fps');
-    const statFpsDesc = document.getElementById('stat-fps-desc');
-    const statBitrate = document.getElementById('stat-bitrate');
-    const statLatency = document.getElementById('stat-latency');
-    const statFrames = document.getElementById('stat-frames');
-    const cardFpsTarget = document.getElementById('card-fps-target');
-    const badgeUsbTier = document.getElementById('badge-usb-tier');
-    const badgeEncoderProto = document.getElementById('badge-encoder-proto');
-    const badgeDropRate = document.getElementById('badge-drop-rate');
-    const statUsbDesc = document.getElementById('stat-usb-desc');
-    const statGpuDesc = document.getElementById('stat-gpu-desc');
-    const statProtoDesc = document.getElementById('stat-proto-desc');
+    const t = (key, values) => translate(preferences.language, key, values);
 
-    // Unified System Status Bar Elements
-    const dotDevice = document.getElementById('dot-device');
-    const valDevice = document.getElementById('val-device');
-    const dotApk = document.getElementById('dot-apk');
-    const valApk = document.getElementById('val-apk');
-    const btnStatusApk = document.getElementById('btn-status-apk');
-    const dotDisplay = document.getElementById('dot-display');
-    const valDisplay = document.getElementById('val-display');
-    const dotDriver = document.getElementById('dot-driver');
-    const valDriver = document.getElementById('val-driver');
-    const btnStatusDriver = document.getElementById('btn-status-driver');
+    function showText(id, key, values) {
+        labels.set(id, { key, values });
+        document.getElementById(id).textContent = t(key, values);
+    }
 
-    // Device Controls
-    const selectDevice = document.getElementById('select-device');
-    const btnRefreshDevices = document.getElementById('btn-refresh-devices');
-    const btnTestUsb = document.getElementById('btn-test-usb');
-    const btnInstallApk = document.getElementById('btn-install-apk'); // guarded
+    function optionWithLabel(label, value) {
+        const option = new Option(label(), value);
+        optionLabels.set(option, label);
+        return option;
+    }
 
-    // Display & Resolution Controls
-    const selectDisplay = document.getElementById('select-display');
-    const btnRefreshDisplays = document.getElementById('btn-refresh-displays');
-    const btnDriverInstall = document.getElementById('btn-driver-install'); // guarded
-    const btnWinDisplay = document.getElementById('btn-win-display');
-    const selectResolution = document.getElementById('select-resolution');
-    const valResolutionRatio = document.getElementById('val-resolution-ratio');
+    function applyAppearance() {
+        document.documentElement.dataset.theme = preferences.theme;
+        document.documentElement.dataset.palette = preferences.palette;
+        $('select-theme').value = preferences.theme;
+        const selected = swatches.find(button => button.dataset.palette === preferences.palette);
+        for (const button of swatches) button.setAttribute('aria-pressed', String(button === selected));
+        showText('palette-name', selected.dataset.label);
+    }
 
-    // Performance Settings
-    const segProfileBtns = document.querySelectorAll('#seg-profile .seg-btn');
-    const valProfileTag = document.getElementById('val-profile-tag');
-    const segFpsBtns = document.querySelectorAll('#seg-fps .seg-btn');
-    const sliderBitrate = document.getElementById('slider-bitrate');
-    const valBitrate = document.getElementById('val-bitrate');
-    const presetTags = document.querySelectorAll('.preset-tag');
-    const segBufferBtns = document.querySelectorAll('#seg-buffermode .seg-btn');
-    const switchAutoreconnect = document.getElementById('switch-autoreconnect');
+    function applyLanguage() {
+        document.documentElement.lang = preferences.language;
+        $('select-language').value = preferences.language;
+        for (const node of document.querySelectorAll('[data-t]')) node.textContent = t(node.dataset.t);
+        for (const node of document.querySelectorAll('[data-label]')) {
+            const label = t(node.dataset.label);
+            node.setAttribute('aria-label', label);
+            if (node.matches('button')) node.title = label;
+        }
+        for (const [id, label] of labels) $(id).textContent = t(label.key, label.values);
+        for (const option of document.querySelectorAll('select option')) {
+            const label = optionLabels.get(option);
+            if (label) option.textContent = label();
+        }
+        controls.fps.setAttribute('aria-valuetext', t('每秒 {fps} 帧', { fps: rates[Number(controls.fps.value)] }));
+        api.setLanguage(preferences.language);
+    }
 
-    // Reconfiguration Confirm Banner Elements
-    const reconfigBanner = document.getElementById('reconfig-confirm-banner');
-    const btnReconfigKeep = document.getElementById('btn-reconfig-keep');
-    const btnReconfigRevert = document.getElementById('btn-reconfig-revert');
-    const reconfigCountdown = document.getElementById('reconfig-countdown');
-
-    // Action Bar & Drawer
-    const btnToggleStream = document.getElementById('btn-toggle-stream');
-    const iconStream = document.getElementById('icon-stream');
-    const textStream = document.getElementById('text-stream');
-    const btnHideTray = document.getElementById('btn-hide-tray');
-    const btnToggleLog = document.getElementById('btn-toggle-log');
-    const btnClearLog = document.getElementById('btn-clear-log');
-    const logDrawer = document.getElementById('log-drawer');
-    const logConsole = document.getElementById('log-console');
-
-    // App State
-    let isStreaming = false;
-    let currentProfile = 'esports';
-    let currentFps = 120;
-    let currentBitrate = 60;
-    let currentWidth = 1752;
-    let currentHeight = 2800;
-    let currentBufferMode = 'lowlatency';
-    let currentOrientation = 'portrait';
-    let currentGpuName = '独立 GPU (NVENC)';
-    let devicesList = [];
-    let displaysList = [];
-    let isClientInstalled = false;
-
-    // Snapshot for safe revert & hot reconfig
-    let savedConfig = {
+    function savePreferences() {
+        localStorage.setItem('preferences', JSON.stringify(preferences));
+    }
+    const $ = id => document.getElementById(id);
+    const controls = {
+        device: $('select-device'),
+        display: $('select-display'),
+        resolution: $('select-resolution'),
+        fps: $('slider-fps'),
+        bitrate: $('slider-bitrate'),
+        reconnect: $('switch-autoreconnect')
+    };
+    const profiles = {
+        esports: { fps: 180, bitrate: 60, bufferMode: 'lowlatency' },
+        quality: { fps: 120, bitrate: 85, bufferMode: 'lowlatency' },
+        office: { fps: 60, bitrate: 30, bufferMode: 'smooth' }
+    };
+    const commonRates = [30, 60, 90, 120, 144, 165, 180, 240];
+    const settings = {
         profile: 'esports',
-        fps: 120,
+        fps: 180,
         bitrate: 60,
         width: 1752,
         height: 2800,
-        bufferMode: 'lowlatency',
-        orientation: 'portrait'
+        bufferMode: 'lowlatency'
     };
-    let reconfigTimer = null;
-    let reconfigInterval = null;
-    let isAwaitingReconfig = false;
+    const profileButtons = document.querySelectorAll('[data-profile]');
+    const bitrateButtons = document.querySelectorAll('[data-val]');
+    const bufferButtons = document.querySelectorAll('[data-mode]');
+    let preferredFps = settings.fps;
+    const virtualRates = [60, 90, 120, 144, 180];
+    let rates = virtualRates;
+    const linkReports = new Map();
+    const speedResults = new Map();
+    let testingSerial = '';
+    const pages = {
+        connect: ['连接', '选择接收设备和采集显示器。'],
+        picture: ['画面', '选择串流帧率、分辨率和编码设置。'],
+        diagnostics: ['诊断', '查看串流实测帧率、耗时和 USB 吞吐。'],
+        settings: ['设置', '调整界面外观、语言和连接行为。']
+    };
+    let devices = [];
+    let displays = [];
+    let deviceProbe = 0;
+    let manualSettings = false;
+    let serviceActive = false;
+    let stopping = false;
+    let savedConfig;
+    let preview;
+    let restartDebounce;
 
-    // 1. Window Controls
-    btnTrayMin.addEventListener('click', () => window.api.hideToTray());
-    btnMinimize.addEventListener('click', () => window.api.minimizeWindow());
-    btnMaximize.addEventListener('click', () => window.api.maximizeWindow());
-    btnClose.addEventListener('click', () => window.api.closeWindow());
-    btnHideTray.addEventListener('click', () => window.api.hideToTray());
+    function showPage(page) {
+        const [title, description] = pages[page];
+        showText('page-title', title);
+        showText('page-description', description);
+        for (const button of document.querySelectorAll('[data-page]')) {
+            const active = button.dataset.page === page;
+            if (active) button.setAttribute('aria-current', 'page');
+            else button.removeAttribute('aria-current');
+            $(button.getAttribute('aria-controls')).hidden = !active;
+        }
+        document.querySelector('main').scrollTop = 0;
+    }
 
-    // 2. Logging Helper
-    function appendLog(msg, type = 'info') {
+    document.querySelectorAll('[data-page]').forEach(button => {
+        button.addEventListener('click', () => showPage(button.dataset.page));
+    });
+
+    function appendLog(message, level = 'info') {
+        const console = $('log-console');
         const line = document.createElement('div');
-        line.className = `log-line log-${type}`;
-        const time = new Date().toLocaleTimeString();
-        line.textContent = `[${time}] ${msg}`;
-        logConsole.appendChild(line);
-        logConsole.scrollTop = logConsole.scrollHeight;
+        line.className = `log-${level}`;
+        line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        console.append(line);
+        if (console.childElementCount > 300) console.firstElementChild.remove();
+        console.scrollTop = console.scrollHeight;
     }
 
-    btnToggleLog.addEventListener('click', () => {
-        logDrawer.classList.toggle('collapsed');
-    });
-
-    btnClearLog.addEventListener('click', () => {
-        logConsole.innerHTML = '';
-        appendLog('日志已清空.');
-    });
-
-    // 3. Status Pill Updater
-    function setStatus(state, message) {
-        statusPill.className = `status-badge status-${state}`;
-        statusText.textContent = message;
-
-        if (state === 'streaming') {
-            isStreaming = true;
-            btnToggleStream.classList.add('md3-fab-stop');
-            btnToggleStream.classList.remove('md3-fab-primary');
-            textStream.textContent = '停止副屏服务';
-            iconStream.innerHTML = '<path d="M6 6h12v12H6z"/>';
-        } else if (state === 'connecting') {
-            textStream.textContent = '正在连接...';
-        } else {
-            isStreaming = false;
-            btnToggleStream.classList.remove('md3-fab-stop');
-            btnToggleStream.classList.add('md3-fab-primary');
-            textStream.textContent = '启动副屏服务';
-            iconStream.innerHTML = '<path d="M8 5v14l11-7z"/>';
-        }
+    function setStatus(state, message, detail = message, values) {
+        $('status-pill').className = `status-badge status-${state}`;
+        $('status-pill').title = t(detail, values);
+        showText('status-text', message, values);
+        $('btn-toggle-stream').disabled = stopping;
+        $('btn-toggle-stream').classList.toggle('stop', serviceActive);
+        showText('text-stream', stopping ? '正在停止…' : serviceActive ? '停止串流' : '启动串流');
+        $('icon-stream').firstElementChild.setAttribute('d', serviceActive ? 'M6 6h12v12H6Z' : 'M8 5v14l11-7Z');
     }
 
-    // 4. GPU Information Probing
-    async function loadGpuInfo() {
-        try {
-            const res = await window.api.getGpuInfo();
-            if (res && res.gpuName) {
-                currentGpuName = res.gpuName;
-                statGpuDesc.textContent = currentGpuName; // Only show GPU model, no wrapping text!
-            }
-        } catch (e) {
-            statGpuDesc.textContent = '独立显卡';
-        }
+    function setHealth(key, state, message, showAction = false) {
+        $(`dot-${key}`).dataset.state = state;
+        showText(`val-${key}`, message);
+        $(`btn-status-${key}`).hidden = !showAction;
     }
 
-    // 5. Device Enumeration & Auto-Adaptation
+    function deviceLabel(device) {
+        return device.model || device.product || t('Android 设备');
+    }
+
     async function inspectDevice(serial) {
+        const id = ++deviceProbe;
+        const isCurrent = () => id === deviceProbe && controls.device.value === serial;
+        setHealth('apk', '', serial ? '检查中…' : '等待设备');
+        renderUsbResult();
+        showText('device-hint', serial ? '已授权 USB 调试。' : '通过 USB 连接并授权调试。');
         if (!serial) return;
 
-        // Check if APK is installed
-        try {
-            const checkRes = await window.api.checkClientInstalled(serial);
-            isClientInstalled = checkRes.installed;
-            if (isClientInstalled) {
-                dotApk.className = 'status-dot status-dot-online';
-                valApk.textContent = '已就绪';
-                btnStatusApk.classList.add('hidden');
-            } else {
-                dotApk.className = 'status-dot status-dot-warning';
-                valApk.textContent = '未安装';
-                btnStatusApk.classList.remove('hidden');
-            }
-        } catch (e) {
-            dotApk.className = 'status-dot status-dot-offline';
-            valApk.textContent = '未知';
-            btnStatusApk.classList.add('hidden');
+        const [apk, specs] = await Promise.allSettled([api.checkClientInstalled(serial), api.detectDeviceSpecs(serial)]);
+        if (!isCurrent()) return;
+        if (apk.status === 'fulfilled' && !apk.value.error) {
+            if (apk.value.installed) setHealth('apk', 'ready', '已就绪');
+            else setHealth('apk', 'warning', '未安装', true);
+        } else {
+            setHealth('apk', 'warning', '检查失败', true);
         }
 
-        // Probe Device Specs (Resolution, Refresh Rate, USB Speed)
-        try {
-            const specs = await window.api.detectDeviceSpecs(serial);
-            if (specs.usbTier) {
-                statUsbDesc.textContent = specs.usbTier; // No extra prefix to prevent line wrap!
-                if (specs.usbTier.includes('10Gbps')) {
-                    badgeUsbTier.textContent = 'USB 3.2';
-                } else if (specs.usbTier.includes('5Gbps')) {
-                    badgeUsbTier.textContent = 'USB 3.0';
-                } else {
-                    badgeUsbTier.textContent = 'USB 2.0';
-                }
+        if (specs.status !== 'fulfilled') {
+            renderUsbResult();
+            return;
+        }
+        const { width, height, fps, usbTier } = specs.value;
+        linkReports.set(serial, usbTier && usbTier !== 'USB 链路未知' ? usbTier : '未知');
+        renderUsbResult();
+        if (width > 0 && height > 0) {
+            showText('device-hint', '设备屏幕 {width} × {height} · 最高 {fps} Hz', { width, height, fps });
+            if (!serviceActive && !manualSettings) {
+                setResolution(width, height);
+                renderDisplay();
+                api.notifyConfigChanged(streamConfig());
             }
-
-            if (specs.width > 0 && specs.height > 0) {
-                appendLog(`[规格自适应] 探测到屏幕物理规格: ${specs.width}x${specs.height} @${specs.fps}Hz`);
-
-                // Auto-set resolution & orientation dropdown
-                setResolution(specs.width, specs.height, false);
-
-                // Auto-select FPS button matching device
-                if (specs.fps >= 120) {
-                    setFps(120, false, false);
-                } else if (specs.fps >= 90) {
-                    setFps(90, false, false);
-                } else {
-                    setFps(60, false, false);
-                }
-            }
-        } catch (e) {
-            appendLog(`探测设备屏幕规格失败: ${e.message}`, 'warn');
         }
     }
 
     async function loadDevices() {
-        appendLog('正在扫描连接的 ADB 设备...');
+        const refresh = $('btn-refresh-devices');
+        refresh.disabled = true;
         try {
-            devicesList = await window.api.getDevices();
-            selectDevice.innerHTML = '';
-
-            if (devicesList.length === 0) {
-                const opt = document.createElement('option');
-                opt.value = '';
-                opt.textContent = '未检测到设备 (请插上 USB 数据线并开启开发者调试)';
-                selectDevice.appendChild(opt);
-                dotDevice.className = 'status-dot status-dot-offline';
-                valDevice.textContent = '未连接设备';
-                dotApk.className = 'status-dot status-dot-offline';
-                valApk.textContent = '等待设备';
-                btnStatusApk.classList.add('hidden');
-                appendLog('未发现已连接的 ADB 设备', 'warn');
-                return;
+            const previous = controls.device.value;
+            devices = await api.getDevices();
+            const preferred = devices.find(d => d.serial === previous) || devices.find(d => d.is_tablet) || devices[0];
+            controls.device.replaceChildren(...devices.map(device => {
+                const name = deviceLabel(device);
+                const duplicate = devices.some(d => d !== device && deviceLabel(d) === name);
+                return new Option(duplicate ? `${name} · ${device.serial}` : name, device.serial);
+            }));
+            if (preferred) {
+                controls.device.value = preferred.serial;
+                appendLog(t('发现 {count} 台 Android 设备。', { count: devices.length }));
+            } else {
+                controls.device.add(optionWithLabel(() => t('未找到已授权设备'), ''));
+                appendLog(t('未找到已授权的 Android 设备。'), 'warn');
             }
-
-            devicesList.forEach((dev, idx) => {
-                const opt = document.createElement('option');
-                opt.value = dev.serial;
-                const isTab = dev.is_tablet;
-                opt.textContent = `${dev.model} (${dev.serial})${isTab ? '  ★ [检测为平板]' : ''}`;
-                if (isTab || idx === 0) {
-                    opt.selected = true;
-                }
-                selectDevice.appendChild(opt);
-            });
-
-            const currentSerial = selectDevice.value;
-            const chosenDev = devicesList.find(d => d.serial === currentSerial) || devicesList[0];
-            dotDevice.className = 'status-dot status-dot-online';
-            valDevice.textContent = chosenDev.model;
-
-            appendLog(`发现 ${devicesList.length} 台设备，当前就绪: ${chosenDev.model}`);
-            inspectDevice(currentSerial);
-        } catch (e) {
-            appendLog(`扫描设备失败: ${e.message}`, 'error');
+            await inspectDevice(controls.device.value);
+        } catch (error) {
+            appendLog(t('设备检查失败 · {error}', { error: error.message }), 'error');
+        } finally {
+            refresh.disabled = false;
         }
     }
 
-    selectDevice.addEventListener('change', () => {
-        const serial = selectDevice.value;
-        const dev = devicesList.find(d => d.serial === serial);
-        if (dev) {
-            dotDevice.className = 'status-dot status-dot-online';
-            valDevice.textContent = dev.model;
-            appendLog(`切换目标设备: ${dev.model} (${dev.serial})`);
-            inspectDevice(serial);
+    controls.device.addEventListener('change', () => {
+        inspectDevice(controls.device.value);
+        settingsChanged();
+    });
+    $('btn-refresh-devices').addEventListener('click', loadDevices);
+
+    function renderUsbResult() {
+        const serial = controls.device.value;
+        const result = speedResults.get(serial);
+        const tier = linkReports.get(serial) || '未知';
+        const busy = testingSerial === serial && Boolean(serial);
+        showText('stat-usb-desc', !serial ? '等待设备' : tier);
+        showText('usb-negotiated', '设备报告 · {tier}', { tier: () => t(tier) });
+        $('usb-speed').textContent = result?.speedMBps.toFixed(1) ?? '—';
+        $('usb-estimate').hidden = !result;
+        if (result) showText('usb-estimate', '{tier} · 吞吐估算', { tier: () => t(result.estimatedTier) });
+        showText('usb-test-state', busy ? '正在传输…' : result ? '' : '尚未测速');
+        $('btn-open-usb').disabled = !serial || Boolean(testingSerial);
+        $('btn-test-usb').disabled = !serial || Boolean(testingSerial);
+        showText('btn-test-usb', busy ? '测速中…' : result ? '重新测速' : '开始测速');
+    }
+
+    async function testUsbSpeed() {
+        const serial = controls.device.value;
+        if (!serial || testingSerial) return;
+        testingSerial = serial;
+        renderUsbResult();
+        let failed = false;
+        try {
+            const result = await api.testUsbSpeed(serial);
+            if (!result.success) throw new Error(result.error);
+            speedResults.set(serial, result);
+            appendLog(t('ADB 文件传输 {speed} MB/s', { speed: result.speedMBps.toFixed(1) }));
+        } catch (error) {
+            failed = true;
+            appendLog(t('USB 测速失败 · {error}', { error: error.message }), 'error');
+        } finally {
+            testingSerial = '';
+            renderUsbResult();
+            if (failed && controls.device.value === serial) showText('usb-test-state', '测速失败，请重试');
+        }
+    }
+
+    $('btn-open-usb').addEventListener('click', () => {
+        showPage('diagnostics');
+        testUsbSpeed();
+    });
+    $('btn-test-usb').addEventListener('click', testUsbSpeed);
+
+    $('btn-status-apk').addEventListener('click', async () => {
+        const serial = controls.device.value;
+        if (!serial) return;
+        const button = $('btn-status-apk');
+        button.disabled = true;
+        setHealth('apk', 'warning', '正在安装…');
+        try {
+            const result = await api.installClientApk(serial);
+            if (!result.success) throw new Error(result.error);
+            if (controls.device.value === serial) setHealth('apk', 'ready', '已就绪');
+            appendLog(t('Android 应用已安装。'));
+        } catch (error) {
+            if (controls.device.value === serial) setHealth('apk', 'warning', '安装失败', true);
+            appendLog(t('安装 Android 应用失败 · {error}', { error: error.message }), 'error');
+        } finally {
+            button.disabled = false;
         }
     });
 
-    btnRefreshDevices.addEventListener('click', loadDevices);
-
-    // 6. USB Cable Benchmark Test
-    btnTestUsb.addEventListener('click', async () => {
-        const serial = selectDevice.value;
-        if (!serial) {
-            appendLog('请先连接安卓设备', 'warn');
-            return;
-        }
-
-        btnTestUsb.disabled = true;
-        btnTestUsb.textContent = '测速中...';
-        appendLog('正在对 USB 数据链路进行带宽推流压力测试 (10MB)...');
-
-        try {
-            const res = await window.api.testUsbSpeed(serial);
-            if (res.success) {
-                statUsbDesc.textContent = `${res.speedMBps} MB/s · ${res.tier}`; // Concise: e.g. 1176.9 MB/s · USB 3.2 Gen 2
-                badgeUsbTier.textContent = res.tier.includes('10Gbps') ? 'USB 3.2' : (res.tier.includes('5Gbps') ? 'USB 3.0' : 'USB 2.0');
-                appendLog(`[USB 测速结果] 传输带宽: ${res.speedMBps} MB/s (${res.tier})`);
-            } else {
-                appendLog(`测速失败: ${res.error}`, 'error');
-            }
-        } catch (e) {
-            appendLog(`测速发生异常: ${e.message}`, 'error');
-        } finally {
-            btnTestUsb.disabled = false;
-            btnTestUsb.textContent = '测速';
-        }
-    });
-
-    // 7. Client APK Install Action
-    async function triggerApkInstall() {
-        const serial = selectDevice.value;
-        if (!serial) {
-            appendLog('请先连接安卓设备', 'warn');
-            return;
-        }
-
-        if (btnInstallApk) {
-            btnInstallApk.disabled = true;
-            btnInstallApk.textContent = '安装中...';
-        }
-        btnStatusApk.disabled = true;
-        btnStatusApk.textContent = '安装中...';
-        dotApk.className = 'status-dot status-dot-warning';
-        valApk.textContent = '正在安装...';
-        appendLog('正在向设备推送并安装 ReDisplay.apk...');
-
-        try {
-            const res = await window.api.installClientApk(serial);
-            if (res.success) {
-                isClientInstalled = true;
-                dotApk.className = 'status-dot status-dot-online';
-                valApk.textContent = '已就绪';
-                btnStatusApk.classList.add('hidden');
-                appendLog('ReDisplay 客户端安装成功！', 'info');
-            } else {
-                dotApk.className = 'status-dot status-dot-warning';
-                valApk.textContent = '未安装';
-                btnStatusApk.classList.remove('hidden');
-                appendLog(`安装客户端失败: ${res.error}`, 'error');
-            }
-        } catch (e) {
-            appendLog(`安装客户端异常: ${e.message}`, 'error');
-        } finally {
-            if (btnInstallApk) {
-                btnInstallApk.disabled = false;
-                btnInstallApk.textContent = '安装客户端';
-            }
-            btnStatusApk.disabled = false;
-            btnStatusApk.textContent = '安装';
-        }
+    function selectedDisplay() {
+        return displays.find(display => display.name === controls.display.value);
     }
 
-    if (btnInstallApk) {
-        btnInstallApk.addEventListener('click', triggerApkInstall);
-    }
-    btnStatusApk.addEventListener('click', triggerApkInstall);
+    function captureSource() {
+        if (controls.display.value) return selectedDisplay();
 
-    // 8. Display & Driver Management
+        // Match the Host's automatic display selection without pinning the current topology.
+        const { width, height } = settings;
+        const landscape = width >= height;
+        return displays.find(d => d.isVirtual) ||
+            displays.find(d => (d.width === width && d.height === height) || (d.width === height && d.height === width)) ||
+            displays.find(d => !d.isPrimary && (d.width >= d.height) === landscape) ||
+            (landscape && displays.find(d => d.width >= d.height)) ||
+            displays[0];
+    }
+
+    function displayLabel(display) {
+        const kind = display.isVirtual ? '虚拟显示器' : display.isPrimary ? '主显示器' : '扩展显示器';
+        return `${t(kind)} ${display.index + 1}`;
+    }
+
+    function renderDisplay() {
+        const display = captureSource();
+        if (display) showText('val-display', '{label} · {width} × {height} · {fps} Hz', { label: () => displayLabel(display), ...display });
+        else showText('val-display', '等待 Windows 显示器。');
+        renderRefreshRates(display);
+    }
+
     async function loadDisplays() {
-        appendLog('正在检测 Windows 显示拓扑...');
+        const refresh = $('btn-refresh-displays');
+        refresh.disabled = true;
         try {
-            displaysList = await window.api.getDisplays();
-            selectDisplay.innerHTML = '';
-
-            const autoOpt = document.createElement('option');
-            autoOpt.value = '-1';
-            autoOpt.textContent = '自动选择 (优先 Virtual Display Driver 虚拟副屏)';
-            selectDisplay.appendChild(autoOpt);
-
-            let vddFound = false;
-            displaysList.forEach((d) => {
-                const opt = document.createElement('option');
-                opt.value = d.index;
-                const tag = d.isVirtual ? '  ★ [虚拟副屏]' : (d.isPrimary ? ' [主显示器]' : ' [扩展显示器]');
-                opt.textContent = `显示器 ${d.index}: ${d.name} (${d.width}x${d.height} @${d.fps}Hz) ${tag}`;
-                if (d.isVirtual) {
-                    opt.selected = true;
-                    vddFound = true;
-                    valDisplay.textContent = `${d.width}×${d.height} @${d.fps}Hz`;
-                    dotDisplay.className = 'status-dot status-dot-online';
-                    statFpsDesc.textContent = `Windows DWM · ${d.fps}Hz`;
-                }
-                selectDisplay.appendChild(opt);
-            });
-
-            if (!vddFound) {
-                if (displaysList.length > 0) {
-                    valDisplay.textContent = `${displaysList[0].width}×${displaysList[0].height} @${displaysList[0].fps}Hz`;
-                    dotDisplay.className = 'status-dot status-dot-online';
-                } else {
-                    valDisplay.textContent = '未连接副屏';
-                    dotDisplay.className = 'status-dot status-dot-offline';
-                }
-            }
-
-            const driverInstalled = await window.api.checkDriverStatus();
-            if (driverInstalled || vddFound) {
-                valDriver.textContent = '正常驱动中';
-                dotDriver.className = 'status-dot status-dot-online';
-                btnStatusDriver.classList.add('hidden');
-            } else {
-                valDriver.textContent = '未检测到';
-                dotDriver.className = 'status-dot status-dot-warning';
-                btnStatusDriver.classList.remove('hidden');
-            }
-        } catch (e) {
-            appendLog(`检测显示器失败: ${e.message}`, 'error');
-        }
-    }
-
-    btnRefreshDisplays.addEventListener('click', loadDisplays);
-    btnWinDisplay.addEventListener('click', () => window.api.openDisplaySettings());
-    selectDisplay.addEventListener('change', () => {
-        const val = selectDisplay.value;
-        const disp = displaysList.find(d => String(d.index) === val);
-        if (disp) {
-            valDisplay.textContent = `${disp.width}×${disp.height} @${disp.fps}Hz`;
-            dotDisplay.className = 'status-dot status-dot-online';
-            appendLog(`切换捕获显示器: ${disp.name} (${disp.width}x${disp.height})`);
-        }
-        if (isStreaming) {
-            triggerHotReconfig();
-        }
-    });
-
-    async function triggerDriverInstall() {
-        if (btnDriverInstall) {
-            btnDriverInstall.disabled = true;
-            btnDriverInstall.textContent = '执行中...';
-        }
-        btnStatusDriver.disabled = true;
-        btnStatusDriver.textContent = '安装中...';
-        appendLog('正在请求 Windows 管理员权限安装/重置虚拟显示器驱动...');
-
-        try {
-            const res = await window.api.manageDriver('install');
-            if (res.success) {
-                appendLog('虚拟副屏驱动部署命令执行完毕，正在重新枚举显示器...', 'info');
-                setTimeout(loadDisplays, 1500);
-            } else {
-                appendLog(`驱动安装未成功: ${res.error}`, 'warn');
-            }
-        } catch (e) {
-            appendLog(`驱动安装异常: ${e.message}`, 'error');
+            const previous = controls.display.value;
+            const [list, driverReady] = await Promise.all([api.getDisplays(), api.checkDriverStatus()]);
+            displays = list;
+            controls.display.replaceChildren(
+                optionWithLabel(() => t('自动选择 · 优先虚拟显示器'), ''),
+                ...displays.map(display => optionWithLabel(() => `${displayLabel(display)} · ${display.width} × ${display.height}`, display.name))
+            );
+            if (displays.some(display => display.name === previous)) controls.display.value = previous;
+            renderDisplay();
+            if (driverReady) setHealth('driver', 'ready', '已启用');
+            else setHealth('driver', 'warning', '未启用', true);
+            $('stat-gpu-desc').textContent = displays.find(d => !d.isVirtual && d.adapter?.includes('NVIDIA'))?.adapter || 'NVENC H.264';
+        } catch (error) {
+            appendLog(t('显示器检查失败 · {error}', { error: error.message }), 'error');
         } finally {
-            if (btnDriverInstall) {
-                btnDriverInstall.disabled = false;
-                btnDriverInstall.textContent = '装驱动';
-            }
-            btnStatusDriver.disabled = false;
-            btnStatusDriver.textContent = '安装';
+            refresh.disabled = false;
         }
     }
 
-    if (btnDriverInstall) {
-        btnDriverInstall.addEventListener('click', triggerDriverInstall);
-    }
-    btnStatusDriver.addEventListener('click', triggerDriverInstall);
-
-    // 9. Hot Reconfiguration & Confirmation Banner (Windows Style)
-    function buildStreamConfig() {
-        const chosenSerial = selectDevice.value;
-        const chosenDisplay = selectDisplay.value;
-        return {
-            serial: chosenSerial || '',
-            display: chosenDisplay !== '-1' ? parseInt(chosenDisplay, 10) : null,
-            fps: currentFps,
-            bitrate: currentBitrate,
-            width: currentWidth,
-            height: currentHeight,
-            bufferMode: currentBufferMode,
-            orientation: currentOrientation,
-            port: 27183
-        };
-    }
-
-    function captureCurrentConfig() {
-        return {
-            profile: currentProfile,
-            fps: currentFps,
-            bitrate: currentBitrate,
-            width: currentWidth,
-            height: currentHeight,
-            bufferMode: currentBufferMode,
-            orientation: currentOrientation
-        };
-    }
-
-    function applyConfigToUI(cfg) {
-        if (!cfg) return;
-        currentProfile = cfg.profile || 'custom';
-        setProfile(cfg.profile || 'custom', false, false);
-        setFps(cfg.fps || 120, false, false);
-        setBitrate(cfg.bitrate || 60, false, false);
-        setBufferMode(cfg.bufferMode || 'lowlatency', false, false);
-        if (cfg.width && cfg.height) {
-            setResolution(cfg.width, cfg.height, false);
-        } else if (cfg.orientation) {
-            setOrientation(cfg.orientation, false);
+    controls.display.addEventListener('change', () => {
+        renderDisplay();
+        settingsChanged();
+    });
+    $('btn-refresh-displays').addEventListener('click', loadDisplays);
+    $('btn-win-display').addEventListener('click', () => api.openDisplaySettings());
+    $('btn-status-driver').addEventListener('click', async () => {
+        const button = $('btn-status-driver');
+        button.disabled = true;
+        setHealth('driver', 'warning', '正在安装…');
+        try {
+            const result = await api.manageDriver('install');
+            if (!result.success) throw new Error(result.error);
+            appendLog(t('显示驱动已安装，正在刷新显示器。'));
+            await loadDisplays();
+        } catch (error) {
+            setHealth('driver', 'warning', '安装失败', true);
+            appendLog(t('安装显示驱动失败 · {error}', { error: error.message }), 'error');
+        } finally {
+            button.disabled = false;
         }
-    }
+    });
 
-    let reconfigDebounceTimer = null;
-    let isReconfiguringHot = false;
-
-    function triggerHotReconfig() {
-        if (!isStreaming) return;
-        if (reconfigDebounceTimer) clearTimeout(reconfigDebounceTimer);
-        reconfigDebounceTimer = setTimeout(async () => {
-            if (isReconfiguringHot) return;
-            isReconfiguringHot = true;
-
-            if (!isAwaitingReconfig) {
-                isAwaitingReconfig = true;
-            }
-
-            const newCfg = buildStreamConfig();
-            appendLog(`[热生效] 正在按新配置重启服务 (${newCfg.width}x${newCfg.height} @${newCfg.fps}Hz, ${newCfg.bitrate}Mbps, 缓冲策略:${newCfg.bufferMode})...`, 'info');
-
-            try {
-                const res = await window.api.restartStream(newCfg);
-                if (!res.success) {
-                    appendLog(`热重启异常: ${res.error}`, 'error');
-                    revertReconfig();
-                    return;
-                }
-                showReconfigBanner();
-            } catch (e) {
-                appendLog(`热重启发生错误: ${e.message}`, 'error');
-                revertReconfig();
-            } finally {
-                isReconfiguringHot = false;
-            }
-        }, 150);
-    }
-
-    function showReconfigBanner() {
-        if (reconfigTimer) clearTimeout(reconfigTimer);
-        if (reconfigInterval) clearInterval(reconfigInterval);
-
-        reconfigBanner.classList.remove('hidden');
-        let remainingSec = 10;
-        reconfigCountdown.textContent = remainingSec;
-
-        reconfigInterval = setInterval(() => {
-            remainingSec--;
-            if (reconfigCountdown) reconfigCountdown.textContent = remainingSec;
-            if (remainingSec <= 0) {
-                clearInterval(reconfigInterval);
-            }
-        }, 1000);
-
-        reconfigTimer = setTimeout(() => {
-            appendLog('[自动保护] 10秒未确认，正在自动回退先前设置...', 'warn');
-            revertReconfig();
-        }, 10000);
-    }
-
-    function hideReconfigBanner() {
-        if (reconfigTimer) { clearTimeout(reconfigTimer); reconfigTimer = null; }
-        if (reconfigInterval) { clearInterval(reconfigInterval); reconfigInterval = null; }
-        reconfigBanner.classList.add('hidden');
-        isAwaitingReconfig = false;
-    }
-
-    function keepReconfig() {
-        hideReconfigBanner();
-        savedConfig = captureCurrentConfig();
-        appendLog('新显示与编码配置已成功保存！', 'info');
-        window.api.notifyConfigChanged(buildStreamConfig());
-    }
-
-    async function revertReconfig() {
-        hideReconfigBanner();
-        appendLog('正在将所有参数回退至先前配置...', 'warn');
-        applyConfigToUI(savedConfig);
-        if (isStreaming) {
-            const restoredCfg = buildStreamConfig();
-            await window.api.restartStream(restoredCfg);
-            appendLog('已恢复先前配置并重新建立串流。', 'info');
+    function setResolution(width, height) {
+        settings.width = width;
+        settings.height = height;
+        const value = `${width}x${height}`;
+        if (![...controls.resolution.options].some(option => option.value === value)) {
+            controls.resolution.add(optionWithLabel(() => t('{width} × {height} · 设备规格', { width, height }), value), 0);
         }
+        controls.resolution.value = value;
+        showText('val-resolution-ratio', height > width ? '竖屏' : '横屏');
     }
 
-    btnReconfigKeep.addEventListener('click', keepReconfig);
-    btnReconfigRevert.addEventListener('click', revertReconfig);
+    controls.resolution.addEventListener('change', () => {
+        const [width, height] = controls.resolution.value.split('x').map(Number);
+        manualSettings = true;
+        setResolution(width, height);
+        renderDisplay();
+        settingsChanged();
+    });
 
-    // 10. Generic Resolution & Display Orientation Dropdown
-    function setResolution(w, h, notifyRestart = true) {
-        currentWidth = w;
-        currentHeight = h;
-        currentOrientation = (h > w) ? 'portrait' : 'landscape';
-
-        const val = `${w}x${h}`;
-        let found = false;
-        for (const opt of selectResolution.options) {
-            if (opt.value === val) {
-                selectResolution.value = val;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            const maxDim = Math.max(w, h);
-            let specTag = (maxDim >= 2700) ? '2.8K' : (maxDim >= 2400 ? '2.5K' : (maxDim >= 1800 ? '2K' : '1080P'));
-            const orientTag = (currentOrientation === 'portrait') ? '竖屏' : '横屏';
-            const newOpt = document.createElement('option');
-            newOpt.value = val;
-            newOpt.textContent = `${w} × ${h} (${specTag} ${orientTag} · 自适应)`;
-            selectResolution.insertBefore(newOpt, selectResolution.firstChild);
-            selectResolution.value = val;
-        }
-
-        // Update ratio badge
-        const gcd = (a, b) => b === 0 ? a : gcd(b, a % b);
-        const g = gcd(w, h);
-        const rw = w / g;
-        const rh = h / g;
-        const orientLabel = (currentOrientation === 'portrait') ? '纵向竖屏' : '横向宽屏';
-        if ((rw === 16 && rh === 10) || (rw === 10 && rh === 16)) {
-            valResolutionRatio.textContent = `16:10 ${orientLabel}`;
-        } else if ((rw === 16 && rh === 9) || (rw === 9 && rh === 16)) {
-            valResolutionRatio.textContent = `16:9 ${orientLabel}`;
+    function renderRefreshRates(display) {
+        const displayRates = display?.modes?.filter(mode => mode.width === settings.width && mode.height === settings.height)
+            .map(mode => mode.fps) || [];
+        if (display?.isVirtual) {
+            rates = [...new Set([...virtualRates, ...displayRates])].sort((a, b) => a - b);
+            showText('fps-hint', 'Windows 会选择可用的显示模式。实际发送和面板呈现帧率以硬件为准。');
+        } else if (display) {
+            const cap = Math.min(240, display.fps);
+            rates = commonRates.filter(rate => rate < cap).concat(cap);
+            showText('fps-hint', '物理采集显示器当前为 {fps} Hz。', display);
         } else {
-            valResolutionRatio.textContent = `${rw}:${rh} ${orientLabel}`;
+            rates = virtualRates;
+            showText('fps-hint', '等待显示器。');
         }
 
-        appendLog(`副屏分辨率设置为: ${w} × ${h} (${orientLabel})`);
-        window.api.notifyConfigChanged(buildStreamConfig());
-        if (notifyRestart) triggerHotReconfig();
+        controls.fps.max = rates.length - 1;
+        controls.fps.disabled = !display || rates.length < 2;
+        const labels = rates.length <= 6 ? rates : [rates[0], rates.at(-1)];
+        $('fps-ticks').replaceChildren(...labels.map(rate => {
+            const label = document.createElement('span');
+            label.textContent = rate;
+            return label;
+        }));
+        setFps(preferredFps);
     }
 
-    selectResolution.addEventListener('change', () => {
-        const [w, h] = selectResolution.value.split('x').map(Number);
-        if (w && h) {
-            setResolution(w, h, true);
+    function showFps(fps) {
+        $('val-fps').textContent = `${fps} FPS`;
+        controls.fps.setAttribute('aria-valuetext', t('每秒 {fps} 帧', { fps }));
+    }
+
+    function setFps(request) {
+        preferredFps = request;
+        const index = rates.findLastIndex(rate => rate <= request);
+        controls.fps.value = Math.max(0, index);
+        settings.fps = rates[Number(controls.fps.value)];
+        showFps(settings.fps);
+    }
+
+    controls.fps.addEventListener('input', () => showFps(rates[Number(controls.fps.value)]));
+    controls.fps.addEventListener('change', () => {
+        const fps = rates[Number(controls.fps.value)];
+        if (settings.fps === fps) return;
+        setFps(fps);
+        selectCustomProfile();
+        settingsChanged();
+    });
+
+    function selectButtons(buttons, key, value) {
+        buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset[key] === String(value))));
+    }
+
+    function selectCustomProfile() {
+        manualSettings = true;
+        settings.profile = 'custom';
+        selectButtons(profileButtons, 'profile', settings.profile);
+    }
+
+    function setBitrate(value) {
+        controls.bitrate.value = value;
+        $('val-bitrate').textContent = `${value} Mbps`;
+        controls.bitrate.setAttribute('aria-valuetext', `${value} Mbps`);
+        selectButtons(bitrateButtons, 'val', value);
+    }
+
+    function setBufferMode(mode) {
+        settings.bufferMode = mode;
+        selectButtons(bufferButtons, 'mode', mode);
+    }
+
+    function applySettings(config) {
+        if (config.serial !== undefined) controls.device.value = config.serial;
+        if (config.displayName !== undefined) controls.display.value = config.displayName || '';
+        if (config.autoReconnect !== undefined) controls.reconnect.checked = config.autoReconnect;
+        if (config.width && config.height) setResolution(config.width, config.height);
+        settings.profile = config.profile || settings.profile;
+        settings.bitrate = config.bitrate ?? settings.bitrate;
+        preferredFps = config.fps ?? preferredFps;
+        setBitrate(settings.bitrate);
+        setBufferMode(config.bufferMode || settings.bufferMode);
+        selectButtons(profileButtons, 'profile', settings.profile);
+        renderDisplay();
+    }
+
+    profileButtons.forEach(button => button.addEventListener('click', () => {
+        manualSettings = true;
+        const profile = button.dataset.profile;
+        applySettings({ profile, ...profiles[profile] });
+        settingsChanged();
+    }));
+
+    function changeBitrate(value) {
+        settings.bitrate = value;
+        setBitrate(value);
+        selectCustomProfile();
+        settingsChanged();
+    }
+    controls.bitrate.addEventListener('input', () => setBitrate(Number(controls.bitrate.value)));
+    controls.bitrate.addEventListener('change', () => changeBitrate(Number(controls.bitrate.value)));
+    bitrateButtons.forEach(button => button.addEventListener('click', () => changeBitrate(Number(button.dataset.val))));
+    bufferButtons.forEach(button => button.addEventListener('click', () => {
+        setBufferMode(button.dataset.mode);
+        selectCustomProfile();
+        settingsChanged();
+    }));
+    controls.reconnect.addEventListener('change', settingsChanged);
+
+    function streamConfig() {
+        const display = selectedDisplay();
+        return {
+            ...settings,
+            serial: controls.device.value,
+            display: display?.index ?? null,
+            displayName: controls.display.value,
+            orientation: settings.height > settings.width ? 'portrait' : 'landscape',
+            autoReconnect: controls.reconnect.checked
+        };
+    }
+
+    function settingsChanged() {
+        api.notifyConfigChanged(streamConfig());
+        if (!serviceActive || stopping) return;
+        clearTimeout(restartDebounce);
+        restartDebounce = setTimeout(restartForPreview, 150);
+    }
+
+    async function restartForPreview() {
+        clearPreview();
+        const next = { config: streamConfig() };
+        preview = next;
+        setStatus('connecting', '正在应用设置');
+        next.watchdog = setTimeout(() => {
+            appendLog(t('新设置未能建立串流，正在还原。'), 'warn');
+            revertPreview();
+        }, 15000);
+        try {
+            const result = await api.restartStream(next.config);
+            if (!result.success && !result.cancelled) throw new Error(result.error);
+        } catch (error) {
+            if (preview !== next) return;
+            appendLog(t('应用设置失败 · {error}', { error: error.message }), 'error');
+            revertPreview();
         }
-    });
+    }
 
-    function setOrientation(orient, notifyRestart = true) {
-        if (orient === 'portrait' && currentWidth > currentHeight) {
-            setResolution(currentHeight, currentWidth, notifyRestart);
-        } else if (orient === 'landscape' && currentHeight > currentWidth) {
-            setResolution(currentHeight, currentWidth, notifyRestart);
+    function showPreview(data) {
+        if (!preview || preview.timer) return;
+        clearTimeout(preview.watchdog);
+        showText('reconfig-desc', '当前串流 {width} × {height} · {fps} FPS。超时将恢复上一组设置。', data);
+        $('reconfig-confirm-banner').hidden = false;
+        showText('reconfig-countdown', '还原 {seconds} 秒', { seconds: 10 });
+        let remaining = 10;
+        preview.interval = setInterval(() => showText('reconfig-countdown', '还原 {seconds} 秒', { seconds: --remaining }), 1000);
+        preview.timer = setTimeout(revertPreview, 10000);
+    }
+
+    function clearPreview() {
+        clearTimeout(preview?.watchdog);
+        clearTimeout(preview?.timer);
+        clearInterval(preview?.interval);
+        preview = null;
+        $('reconfig-confirm-banner').hidden = true;
+    }
+
+    async function revertPreview() {
+        clearTimeout(restartDebounce);
+        clearPreview();
+        if (!serviceActive || !savedConfig) return;
+        const previousSerial = controls.device.value;
+        applySettings(savedConfig);
+        if (controls.device.value !== previousSerial) inspectDevice(controls.device.value);
+        setStatus('connecting', '正在还原设置');
+        try {
+            const result = await api.restartStream(savedConfig);
+            if (!result.success && !result.cancelled) throw new Error(result.error);
+        } catch (error) {
+            serviceActive = false;
+            setStatus('error', '还原失败', error.message);
+            appendLog(t('还原失败 · {error}', { error: error.message }), 'error');
         }
     }
 
-    // 11. Performance Profiles (Gear Selection)
-    function setProfile(profile, log = true, notifyRestart = true) {
-        currentProfile = profile;
-        segProfileBtns.forEach(b => {
-            if (b.dataset.profile === profile) {
-                b.classList.add('active');
-            } else {
-                b.classList.remove('active');
-            }
-        });
-
-        if (profile === 'esports') {
-            valProfileTag.textContent = '120Hz 极速电竞直通';
-            setFps(120, false, false);
-            setBitrate(60, false, false);
-            setBufferMode('lowlatency', false, false);
-            if (log) appendLog('切换档位: ⚡ 120Hz 极速电竞直通 (120Hz · 60Mbps · ≤10ms 极低延迟)');
-        } else if (profile === 'quality') {
-            valProfileTag.textContent = '120Hz 极致超清画质';
-            setFps(120, false, false);
-            setBitrate(85, false, false);
-            setBufferMode('lowlatency', false, false);
-            if (log) appendLog('切换档位: 🎬 120Hz 极致超清画质 (120Hz · 85Mbps · 高保真超清)');
-        } else if (profile === 'office') {
-            valProfileTag.textContent = '60Hz 节能办公模式';
-            setFps(60, false, false);
-            setBitrate(30, false, false);
-            setBufferMode('smooth', false, false);
-            if (log) appendLog('切换档位: 🔋 60Hz 节能办公模式 (60Hz · 30Mbps · 平滑低功耗)');
-        } else if (profile === 'custom') {
-            valProfileTag.textContent = '自定义调优';
-        }
-
-        window.api.notifyConfigChanged(buildStreamConfig());
-        if (notifyRestart) triggerHotReconfig();
-    }
-
-    function markCustomProfile() {
-        currentProfile = 'custom';
-        segProfileBtns.forEach(b => {
-            if (b.dataset.profile === 'custom') {
-                b.classList.add('active');
-            } else {
-                b.classList.remove('active');
-            }
-        });
-        valProfileTag.textContent = '自定义调优';
-        window.api.notifyConfigChanged(buildStreamConfig());
-    }
-
-    segProfileBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            setProfile(btn.dataset.profile, true, true);
-        });
+    $('btn-reconfig-keep').addEventListener('click', () => {
+        if (!preview) return;
+        savedConfig = preview.config;
+        clearPreview();
+        appendLog(t('已保留新设置。'));
     });
+    $('btn-reconfig-revert').addEventListener('click', revertPreview);
 
-    // 12. Refresh Rate Selection
-    function setFps(fps, markCustom = true, notifyRestart = true) {
-        currentFps = fps;
-        segFpsBtns.forEach(b => {
-            if (parseInt(b.dataset.fps, 10) === fps) {
-                b.classList.add('active');
-            } else {
-                b.classList.remove('active');
-            }
-        });
-        cardFpsTarget.textContent = `${currentFps} Hz`;
-        if (markCustom) markCustomProfile();
-        window.api.notifyConfigChanged(buildStreamConfig());
-        if (notifyRestart) triggerHotReconfig();
-    }
-
-    segFpsBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            setFps(parseInt(btn.dataset.fps, 10), true, true);
-            appendLog(`选择目标刷新率: ${currentFps} Hz`);
-        });
-    });
-
-    // 13. Bitrate Slider & Presets
-    function setBitrate(val, markCustom = true, notifyRestart = true) {
-        currentBitrate = val;
-        sliderBitrate.value = val;
-        valBitrate.textContent = `${val} Mbps`;
-        updatePresetTags(val);
-        if (markCustom) markCustomProfile();
-        window.api.notifyConfigChanged(buildStreamConfig());
-        if (notifyRestart) triggerHotReconfig();
-    }
-
-    sliderBitrate.addEventListener('input', (e) => {
-        const val = parseInt(e.target.value, 10);
-        currentBitrate = val;
-        valBitrate.textContent = `${val} Mbps`;
-        updatePresetTags(val);
-        markCustomProfile();
-    });
-
-    sliderBitrate.addEventListener('change', (e) => {
-        const val = parseInt(e.target.value, 10);
-        setBitrate(val, true, true);
-    });
-
-    function updatePresetTags(val) {
-        presetTags.forEach(tag => {
-            if (parseInt(tag.dataset.val, 10) === val) {
-                tag.classList.add('active-tag');
-            } else {
-                tag.classList.remove('active-tag');
-            }
-        });
-    }
-
-    presetTags.forEach(tag => {
-        tag.addEventListener('click', () => {
-            const val = parseInt(tag.dataset.val, 10);
-            setBitrate(val, true, true);
-            appendLog(`选择码率预设: ${val} Mbps`);
-        });
-    });
-
-    // 14. Buffer Mode Selection
-    function setBufferMode(mode, markCustom = true, notifyRestart = true) {
-        currentBufferMode = mode;
-        segBufferBtns.forEach(b => {
-            if (b.dataset.mode === mode) {
-                b.classList.add('active');
-            } else {
-                b.classList.remove('active');
-            }
-        });
-        if (markCustom) markCustomProfile();
-        window.api.notifyConfigChanged(buildStreamConfig());
-        if (notifyRestart) triggerHotReconfig();
-    }
-
-    segBufferBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            setBufferMode(btn.dataset.mode, true, true);
-            appendLog(`延迟控制策略切换为: ${btn.textContent.trim()}`);
-        });
-    });
-
-    // 15. Start / Stop Streaming Pipeline
     async function startStream() {
-        const chosenSerial = selectDevice.value;
-
-        // Auto-check APK before streaming
-        if (chosenSerial && !isClientInstalled) {
-            appendLog('客户端尚未安装，正在自动向安卓设备静默部署 ReDisplay.apk...', 'warn');
-            setStatus('connecting', '部署客户端 APK...');
-            valApk.textContent = '正在部署...';
-            dotApk.className = 'status-dot status-dot-warning';
-            const installRes = await window.api.installClientApk(chosenSerial);
-            if (!installRes.success) {
-                setStatus('error', 'APK 安装失败');
-                valApk.textContent = '安装失败';
-                appendLog(`自动安装客户端 APK 失败: ${installRes.error}`, 'error');
-                return;
-            }
-            isClientInstalled = true;
-            valApk.textContent = '已就绪';
-            dotApk.className = 'status-dot status-dot-online';
-            btnStatusApk.classList.add('hidden');
-            appendLog('客户端 APK 部署成功，继续启动串流...', 'info');
-        }
-
-        const config = buildStreamConfig();
-        savedConfig = captureCurrentConfig(); // Sync savedConfig on initial start
-
-        setStatus('connecting', '正在初始化...');
-        appendLog(`启动串流: 目标=${config.serial || '自动'} | 显示器=${config.display !== null ? config.display : '自动'} | ${config.width}x${config.height} @${config.fps}Hz | ${config.bitrate}Mbps | 缓冲:${config.bufferMode}`);
-
-        const res = await window.api.startStream(config);
-        if (!res.success) {
-            setStatus('error', '启动失败');
-            appendLog(`启动失败: ${res.error}`, 'error');
+        if (serviceActive || stopping) return;
+        savedConfig = streamConfig();
+        serviceActive = true;
+        setStatus('connecting', '正在连接');
+        try {
+            const result = await api.startStream(savedConfig);
+            if (!result.success && !result.cancelled) throw new Error(result.error);
+        } catch (error) {
+            serviceActive = false;
+            setStatus('error', '启动失败', error.message);
+            appendLog(t('启动失败 · {error}', { error: error.message }), 'error');
+            showPage('diagnostics');
+            $('log-drawer').open = true;
         }
     }
 
     async function stopStream() {
-        const chosenSerial = selectDevice.value;
-        hideReconfigBanner();
-        setStatus('idle', '待机就绪');
-        appendLog('正在停止副屏服务并释放通道...');
-        await window.api.stopStream(chosenSerial);
-        resetStats();
-        appendLog('副屏服务已停止，通道已清理，安卓端已退出占用。', 'info');
+        if (stopping) return;
+        stopping = true;
+        clearTimeout(restartDebounce);
+        clearPreview();
+        setStatus('connecting', '正在停止');
+        await api.stopStream();
     }
 
-    btnToggleStream.addEventListener('click', () => {
-        if (isStreaming) {
-            stopStream();
-        } else {
-            startStream();
-        }
-    });
+    $('btn-toggle-stream').addEventListener('click', () => serviceActive ? stopStream() : startStream());
+
+    function updateStats(data) {
+        $('stat-fps').textContent = data.fps.toFixed(1);
+        showText('stat-fps-desc', '采集 {capture} · 编码 {encode}', { capture: data.wgcFps.toFixed(1), encode: data.encodeFps.toFixed(1) });
+        $('stat-bitrate').textContent = data.mbps.toFixed(1);
+        $('stat-latency').textContent = data.encodeMs.toFixed(2);
+        $('stat-encode-tail').textContent = 'P95 ' + data.encodeP95Ms.toFixed(2) + ' ms';
+        $('stat-frame-gap').textContent = data.encodeGapP95Ms.toFixed(2) + ' ms';
+        $('stat-frames').textContent = data.frames.toLocaleString();
+        const total = data.frames + data.dropped;
+        const dropped = total ? (data.dropped * 100 / total).toFixed(1) : '0.0';
+        showText('badge-drop-rate', '发送队列丢帧 {dropped}%', { dropped });
+        $('badge-drop-rate').classList.toggle('warning', data.dropped > 0);
+    }
 
     function resetStats() {
-        statFps.textContent = '0.0';
-        statBitrate.textContent = '0.0';
-        statLatency.textContent = '0.0';
-        statFrames.textContent = '0';
-        badgeDropRate.textContent = '丢帧率 0.0%';
-        badgeDropRate.classList.remove('stat-badge-warning');
+        for (const id of ['stat-fps', 'stat-bitrate', 'stat-latency', 'stat-frames']) $(id).textContent = '—';
+        showText('stat-fps-desc', '等待采集');
+        $('stat-encode-tail').textContent = 'P95 —';
+        $('stat-frame-gap').textContent = '—';
+        showText('stream-mode', '等待启动');
+        $('card-fps-target').hidden = true;
+        showText('badge-drop-rate', '发送队列丢帧 {dropped}%', { dropped: 0 });
+        $('badge-drop-rate').classList.remove('warning');
     }
 
-    // 14. Listen to Stream Events
-    window.api.onStreamEvent((data) => {
+    const connectingLabels = {
+        connecting: '正在建立连接',
+        detecting_devices: '正在检查设备',
+        launching_app: '正在启动 Android 应用',
+        waiting_device: '等待设备连接',
+        disconnected: '正在重连'
+    };
+
+    api.onStreamEvent(data => {
         if (data.type === 'stats') {
-            statFps.textContent = data.fps.toFixed(1);
-            statBitrate.textContent = data.mbps.toFixed(1);
-            statLatency.textContent = data.encodeMs.toFixed(2);
-            statFrames.textContent = data.frames.toLocaleString();
-            if (data.dropped && data.dropped > 0) {
-                const total = data.frames + data.dropped;
-                const dropPct = ((data.dropped / total) * 100).toFixed(1);
-                badgeDropRate.textContent = `丢帧率 ${dropPct}%`;
-                badgeDropRate.classList.add('stat-badge-warning');
-            } else {
-                badgeDropRate.textContent = '丢帧率 0.0%';
-                badgeDropRate.classList.remove('stat-badge-warning');
-            }
+            updateStats(data);
+        } else if (data.type === 'device_selected') {
+            appendLog(t('已选择设备 · {name}', { name: data.model || data.serial }));
         } else if (data.type === 'state') {
             if (data.status === 'streaming') {
-                setStatus('streaming', `串流中 (${data.fps || currentFps}Hz)`);
-                appendLog(`[Stream] 正在直推 -> ${data.width}x${data.height} @${data.fps}Hz (${data.bitrate} Mbps)`);
-                if (data.device) {
-                    valDevice.textContent = data.device;
+                const source = displays.find(display => display.index === data.display);
+                if (source) {
+                    showText('val-display', '{label} · {width} × {height} · Windows {displayHz} Hz', { ...data, label: () => displayLabel(source) });
                 }
-            } else if (data.status === 'connecting' || data.status === 'detecting_devices' || data.status === 'launching_app') {
-                setStatus('connecting', data.message || '连接中...');
-                appendLog(`[Host] ${data.message || data.status}`);
-            } else if (data.status === 'waiting_device') {
-                setStatus('connecting', '等待设备接入...');
-                appendLog('[Host] 等待安卓设备通过 USB 连接...');
-            } else if (data.status === 'disconnected') {
-                setStatus('connecting', '连接断开，正在重连...');
-                appendLog(`[Host] ${data.message || '连接断开，自动重连中...'}`, 'warn');
-            } else if (data.status === 'error') {
-                setStatus('error', data.message || '发生错误');
-                appendLog(`[Host Error] ${data.message}`, 'error');
-            }
-        } else if (data.type === 'device_selected') {
-            appendLog(`[Host] 绑定设备: ${data.model} (${data.serial})`);
-            valDevice.textContent = data.model;
-        }
-    });
-
-    window.api.onStreamStatus((status) => {
-        if (status.status === 'stopped') {
-            if (isAwaitingReconfig) {
-                // Ignore transient stopped event during hot-restart
-                appendLog('副屏通道正在重启并应用新配置...', 'info');
-                return;
-            }
-            setStatus('idle', '待机中');
-            appendLog(`副屏服务已停止 (代码: ${status.code || 0})`);
-            resetStats();
-        } else if (status.status === 'error') {
-            if (isAwaitingReconfig) {
-                appendLog(`热重启过程中出现波动: ${status.message || ''}`, 'warn');
-                return;
-            }
-            setStatus('error', status.message || '服务异常退出');
-            appendLog(`副屏服务错误: ${status.message}`, 'error');
-            resetStats();
-        }
-    });
-
-    // 16. Tray Action Listener
-    window.api.onTrayAction((data) => {
-        if (!data) return;
-        if (data.action === 'start') {
-            if (!isStreaming) startStream();
-        } else if (data.action === 'stop') {
-            if (isStreaming) stopStream();
-        } else if (data.action === 'change-config') {
-            applyConfigToUI(data.config);
-            if (isStreaming) {
-                triggerHotReconfig();
+                showText('stream-mode', '{width} × {height} · {fps} FPS', data);
+                showText('card-fps-target', '目标 {fps} FPS', data);
+                $('card-fps-target').hidden = false;
+                setStatus('streaming', '串流中 · {fps} FPS', undefined, data);
+                showPreview(data);
+                appendLog(t('串流已建立 · {mode}', { mode: $('stream-mode').textContent }));
+            } else if (connectingLabels[data.status]) {
+                if (data.status === 'disconnected') resetStats();
+                const message = data.status === 'connecting' && data.phase === 'installing' ?
+                    '正在安装 Android 应用' : connectingLabels[data.status];
+                setStatus('connecting', message, data.message || message);
+                appendLog(data.message || t(message));
+            } else if (data.status === 'mode_warning' || data.status === 'error') {
+                appendLog(data.message, data.status === 'error' ? 'error' : 'warn');
+                if (data.status === 'error') setStatus('error', '连接遇到问题', data.message);
             }
         }
     });
 
-    // Initial load
-    loadGpuInfo();
+    api.onStreamStatus(status => {
+        if (preview && !stopping) {
+            revertPreview();
+            return;
+        }
+        serviceActive = false;
+        stopping = false;
+        clearTimeout(restartDebounce);
+        clearPreview();
+        resetStats();
+        if (status.status === 'error') {
+            setStatus('error', '串流异常退出', status.message);
+            appendLog(status.message || t('串流异常退出。'), 'error');
+            showPage('diagnostics');
+            $('log-drawer').open = true;
+        } else {
+            setStatus('idle', '待机就绪');
+            loadDisplays();
+            appendLog(t('串流已停止。'));
+        }
+    });
+
+    api.onClientInstalled(serial => {
+        if (serial === controls.device.value) setHealth('apk', 'ready', '已就绪');
+    });
+    api.onTrayAction(data => {
+        if (data?.action === 'start') startStream();
+        else if (data?.action === 'change-config') {
+            manualSettings = true;
+            applySettings(data.config);
+            settingsChanged();
+        }
+    });
+
+    $('btn-tray-min').addEventListener('click', () => api.hideToTray());
+    $('btn-minimize').addEventListener('click', () => api.minimizeWindow());
+    $('btn-maximize').addEventListener('click', () => api.maximizeWindow());
+    $('btn-close').addEventListener('click', () => api.closeWindow());
+    $('btn-clear-log').addEventListener('click', () => $('log-console').replaceChildren());
+
+    $('select-theme').addEventListener('change', event => {
+        preferences.theme = event.target.value;
+        applyAppearance();
+        savePreferences();
+    });
+    $('select-language').addEventListener('change', event => {
+        preferences.language = event.target.value;
+        applyLanguage();
+        savePreferences();
+    });
+    for (const button of swatches) {
+        button.addEventListener('click', () => {
+            preferences.palette = button.dataset.palette;
+            applyAppearance();
+            savePreferences();
+        });
+    }
+
+    applyAppearance();
+    applyLanguage();
+    showPage('connect');
+    setStatus('idle', '待机就绪');
+    setHealth('apk', '', '等待设备');
+    renderUsbResult();
+    resetStats();
+    appendLog(t('控制中心已就绪。'));
+    renderDisplay();
     loadDevices();
     loadDisplays();
-});
+})();

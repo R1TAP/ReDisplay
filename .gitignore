@@ -1,6 +1,10 @@
-﻿# ReDisplay - Git Ignore Rules
+# ==============================================================================
+# ReDisplay - Git Ignore Rules (v1.1.0)
+# ==============================================================================
 
-# C/C++ Intermediate & Build Files
+# ------------------------------------------------------------------------------
+# 1. C/C++ & MSVC Build Artifacts
+# ------------------------------------------------------------------------------
 *.obj
 *.o
 *.pdb
@@ -9,43 +13,88 @@
 *.exp
 *.lib
 *.map
-Host/*.obj
-Host/*.pdb
-Host/*.ilk
+*.res
+*.pch
+Host/*.exe
+Tests/*
 
-# Logs & Temporary Files
-*.log
-*.tmp
-*.bak
-scratch/
+# Visual Studio Intermediate Folders
+.vs/
+x64/
+Debug/
+Release/
+*.suo
+*.user
+*.userosv
+*.sln.docstates
 
-# Node.js / Electron Dependencies
+# ------------------------------------------------------------------------------
+# 2. Android / Client Build Artifacts & Credentials
+# ------------------------------------------------------------------------------
+Client/bin/
+Client/build/
+Client/*.idsig
+Client/*.apk.idsig
+Client/*.apk
+*.dex
+.gradle/
+build/
+
+# Signing Keystores & Sensitive Keys (Keep strictly local)
+*.jks
+*.keystore
+*.key
+*.p12
+*.pem
+
+# ------------------------------------------------------------------------------
+# 3. Node.js & Electron Dependencies
+# ------------------------------------------------------------------------------
 node_modules/
 GUI/node_modules/
 npm-debug.log*
 yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# Android / Client Intermediate Files
-Client/bin/
-Client/*.idsig
-.gradle/
-build/
-*.dex
-*.apk.idsig
-
-# Standalone Distribution Packages
-ReDisplay-Win64/
+# ------------------------------------------------------------------------------
+# 4. Packaging & Distribution Outputs (Release binaries and archives)
+# ------------------------------------------------------------------------------
+Release/ReDisplay-*/
+Release/*.zip
+Release/Archive/
 ReDisplay-*.zip
+ReDisplay-Win64/
+ReDisplay-v*-Win64/
+
+# ------------------------------------------------------------------------------
+# 5. Local Scratch, Test Traces & Logs
+# ------------------------------------------------------------------------------
+scratch/
+*.log
+*.tmp
+*.bak
+*.swp
+*.patch
+*.diff
+
+# ------------------------------------------------------------------------------
+# 6. IDEs, Editors & OS System Files
+# ------------------------------------------------------------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
 
 # Windows System Files
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+*.lnk
 
-# IDE & Editor Settings
-.vs/
-.vscode/
-.idea/
-*.suo
-*.user
+# macOS Files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes

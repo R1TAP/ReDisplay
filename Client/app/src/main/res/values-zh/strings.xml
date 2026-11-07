@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ReDisplay</string>
+    <string name="waiting">等待 Windows 主机连接…\n端口 %1$d · 双击切换缩放方式</string>
+    <string name="scale_fit">适应屏幕</string>
+    <string name="scale_fill">裁剪铺满</string>
+    <string name="scale_stretch">拉伸铺满</string>
+    <string name="scale_mode">缩放方式 · %1$s</string>
+    <string name="connected">已连接 · %1$s\n正在接收 %2$d FPS 视频</string>
+    <string name="disconnected">主机已断开，等待重新连接…\n端口 %1$d</string>
+    <string name="stream_running">副屏运行中 · %1$s</string>
+    <string name="waiting_notification">等待 Windows 主机连接</string>
+    <string name="stream_stats">ReDisplay\n解码 %1$.1f FPS · %2$.1f Mbps\n缩放 %3$s · 双击切换</string>
+    <string name="service_ready">ReDisplay 已就绪</string>
+    <string name="notification_channel">ReDisplay 连接</string>
+    <string name="notification_description">显示有线副屏的连接状态</string>
+    <string name="notification_title">ReDisplay 有线副屏</string>
+</resources>

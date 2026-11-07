@@ -14,14 +14,14 @@ public:
     AdbManager();
 
     bool FindAdbPath();
-    std::string GetAdbPath() const { return m_adbPath; }
+    std::wstring GetAdbPath() const { return m_adbPath; }
 
     std::vector<AdbDevice> GetDevices();
-    bool SetupPortForward(const std::string& serial, int hostPort, int devicePort);
+    int SetupPortForward(const std::string& serial, int hostPort, int devicePort);
+    void RemovePortForward(const std::string& serial, int hostPort);
     bool LaunchClientApp(const std::string& serial);
-    bool WakeDevice(const std::string& serial);
 
 private:
-    std::string m_adbPath;
-    std::string ExecuteCommand(const std::string& cmd);
+    std::wstring m_adbPath;
+    bool ExecuteCommand(const std::string& cmd, std::string& output);
 };

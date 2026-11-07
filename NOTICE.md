@@ -40,3 +40,18 @@ ReDisplay incorporates or interfaces with the following third-party components:
 - **Notice**:
   ReDisplay Android uses the MediaCodec API to invoke Qualcomm hardware codecs.
   ReDisplay does not distribute any proprietary code or binaries from Qualcomm.
+
+---
+
+## 5. Virtual Display Driver and NefCon
+
+- The bundled MttVDD DLL, INF, and catalog are from the MikeTheTech / VirtualDrivers Virtual Display Driver family. The local INF identifies version 11.30.4.434 and Root\MttVDD. The upstream project publishes its source and MIT license.
+  - https://github.com/VirtualDrivers/Virtual-Display-Driver
+  - https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/master/LICENSE
+- The bundled nefcon.exe is the Nefarius device management utility. Its upstream project publishes its source and MIT license.
+  - https://github.com/nefarius/nefcon
+  - https://github.com/nefarius/nefcon/blob/master/LICENSE
+
+## 6. Electron / Chromium
+
+- The Windows package uses the Electron runtime pinned by GUI/package-lock.json. The bundled Electron LICENSE and LICENSES.chromium.html accompany the runtime. LICENSE.ReDisplay contains the application license.

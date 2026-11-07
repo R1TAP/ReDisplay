@@ -23,7 +23,7 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
     m_fps = fps;
     m_bitrateMbps = bitrateMbps;
 
-    m_hNvEnc = LoadLibraryA("nvEncodeAPI64.dll");
+    m_hNvEnc = LoadLibraryExW(L"nvEncodeAPI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!m_hNvEnc) {
         std::cerr << "[NVENC] Failed to load nvEncodeAPI64.dll" << std::endl;
         return false;
@@ -135,15 +135,21 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
     return true;
 }
 
-bool NvEncoderD3D11::EncodeFrame(ID3D11Texture2D* pTexture, uint64_t frameIndex, std::vector<uint8_t>& outBitstream, bool& isKeyframe) {
+bool NvEncoderD3D11::EncodeFrame(ID3D11Texture2D* pTexture, bool forceIdr, std::vector<uint8_t>& outBitstream, bool& isKeyframe) {
     if (!m_initialized || !pTexture || !m_hEncoder) return false;
 
     // Fast-path: check if texture is already registered
     NV_ENC_REGISTERED_PTR regPtr = nullptr;
     auto it = m_registeredResources.find(pTexture);
     if (it != m_registeredResources.end()) {
-        regPtr = it->second;
+        regPtr = it->second.resource;
     } else {
+        // The capture pool normally reuses three textures. Limit retained COM references.
+        if (m_registeredResources.size() >= 8) {
+            auto old = m_registeredResources.begin();
+            if (m_nvList.nvEncUnregisterResource(m_hEncoder, old->second.resource) != NV_ENC_SUCCESS) return false;
+            m_registeredResources.erase(old);
+        }
         NV_ENC_REGISTER_RESOURCE regRes = { 0 };
         regRes.version = NV_ENC_REGISTER_RESOURCE_VER;
         regRes.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
@@ -157,7 +163,9 @@ bool NvEncoderD3D11::EncodeFrame(ID3D11Texture2D* pTexture, uint64_t frameIndex,
             return false;
         }
         regPtr = regRes.registeredResource;
-        m_registeredResources[pTexture] = regPtr;
+        RegisteredTexture registered{ {}, regPtr };
+        registered.texture.copy_from(pTexture);
+        m_registeredResources.emplace(pTexture, std::move(registered));
     }
 
     NV_ENC_MAP_INPUT_RESOURCE mapRes = { 0 };
@@ -179,7 +187,7 @@ bool NvEncoderD3D11::EncodeFrame(ID3D11Texture2D* pTexture, uint64_t frameIndex,
     picParams.outputBitstream = m_bitstreamBuffer;
     picParams.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
 
-    if (frameIndex == 0 || (frameIndex % (m_fps * 5) == 0)) {
+    if (forceIdr) {
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
     }
 
@@ -211,8 +219,8 @@ bool NvEncoderD3D11::EncodeFrame(ID3D11Texture2D* pTexture, uint64_t frameIndex,
 void NvEncoderD3D11::Destroy() {
     if (m_hEncoder) {
         for (auto& pair : m_registeredResources) {
-            if (pair.second) {
-                m_nvList.nvEncUnregisterResource(m_hEncoder, pair.second);
+            if (pair.second.resource) {
+                m_nvList.nvEncUnregisterResource(m_hEncoder, pair.second.resource);
             }
         }
         m_registeredResources.clear();

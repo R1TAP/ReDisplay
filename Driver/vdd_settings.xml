@@ -11,6 +11,7 @@
         <g_refresh_rate>90</g_refresh_rate>
         <g_refresh_rate>120</g_refresh_rate>
         <g_refresh_rate>144</g_refresh_rate>
+        <g_refresh_rate>180</g_refresh_rate>
     </global>
     <resolutions>
         <!-- Samsung Tab S9+ Native Portrait (User's primary orientation) -->

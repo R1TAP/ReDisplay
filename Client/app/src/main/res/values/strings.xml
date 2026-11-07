@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ReDisplay</string>
+    <string name="waiting">Waiting for the Windows host…\nPort %1$d · Double-tap to change scaling</string>
+    <string name="scale_fit">Fit</string>
+    <string name="scale_fill">Fill</string>
+    <string name="scale_stretch">Stretch</string>
+    <string name="scale_mode">Scaling · %1$s</string>
+    <string name="connected">Connected · %1$s\nReceiving video at %2$d FPS</string>
+    <string name="disconnected">Host disconnected. Waiting to reconnect…\nPort %1$d</string>
+    <string name="stream_running">Streaming · %1$s</string>
+    <string name="waiting_notification">Waiting for the Windows host</string>
+    <string name="stream_stats">ReDisplay\nDecode %1$.1f FPS · %2$.1f Mbps\nScaling %3$s · Double-tap to change</string>
+    <string name="service_ready">ReDisplay is ready</string>
+    <string name="notification_channel">ReDisplay connection</string>
+    <string name="notification_description">Status of the wired display connection</string>
+    <string name="notification_title">ReDisplay wired display</string>
 </resources>

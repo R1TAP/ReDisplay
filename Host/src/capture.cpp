@@ -1,10 +1,11 @@
 #include "capture.h"
 #include <iostream>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <dxgi.h>
-#include <d3d11_4.h>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
@@ -14,205 +15,202 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 
 #pragma comment(lib, "windowsapp.lib")
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "user32.lib")
 
-extern "C" HRESULT WINAPI CreateDirect3D11DeviceFromDXGIDevice(IDXGIDevice* dxgiDevice, IInspectable** graphicsDevice);
+using namespace winrt::Windows::Graphics::Capture;
+using namespace std::chrono;
 
 struct ScreenCapture::Impl {
-    winrt::Windows::Graphics::Capture::GraphicsCaptureItem item{ nullptr };
-    winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool framePool{ nullptr };
-    winrt::Windows::Graphics::Capture::GraphicsCaptureSession session{ nullptr };
-    winrt::event_token frameArrivedToken;
+    GraphicsCaptureItem item{ nullptr };
+    Direct3D11CaptureFramePool framePool{ nullptr };
+    GraphicsCaptureSession session{ nullptr };
+    Direct3D11CaptureFramePool::FrameArrived_revoker arrived;
+    GraphicsCaptureItem::Closed_revoker closed;
 
-    ID3D11Device* pD3DDevice = nullptr;
-    ID3D11DeviceContext* pD3DContext = nullptr;
-    winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice winrtDevice{ nullptr };
-    FrameCallback onFrame;
-
-    // Zero-copy drop-to-latest frame queue
-    winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame pendingFrame{ nullptr };
+    Direct3D11CaptureFrame pendingFrame{ nullptr };
     std::mutex frameMutex;
-    HANDLE hFrameEvent = NULL;
-    std::thread workerThread;
-
-    std::atomic<uint64_t> wgcArrivedCount{ 0 };
+    winrt::handle frameEvent;
+    winrt::handle stopEvent;
+    winrt::handle paceTimer;
+    std::thread worker;
+    FrameCallback onFrame;
+    std::atomic<uint64_t> arrivedCount{ 0 };
     std::atomic<bool> running{ false };
+    std::atomic<bool> healthy{ true };
+    winrt::Windows::Graphics::SizeInt32 size{};
+    int targetFps = 60;
 };
 
-ScreenCapture::ScreenCapture() : m_impl(std::make_unique<Impl>()), m_width(0), m_height(0) {}
+ScreenCapture::ScreenCapture() : m_impl(std::make_shared<Impl>()), m_width(0), m_height(0) {}
 ScreenCapture::~ScreenCapture() { Stop(); }
 
-uint64_t ScreenCapture::GetArrivedFrameCount() const {
-    return m_impl ? m_impl->wgcArrivedCount.load() : 0;
-}
+uint64_t ScreenCapture::GetArrivedFrameCount() const { return m_impl->arrivedCount; }
+bool ScreenCapture::IsHealthy() const { return m_impl->healthy; }
 
-bool ScreenCapture::Initialize(ID3D11Device* pDevice, HMONITOR hMonitor, int targetFps, FrameCallback onFrame) {
-    m_impl->pD3DDevice = pDevice;
-    pDevice->GetImmediateContext(&m_impl->pD3DContext);
-    m_impl->onFrame = onFrame;
-
-    // Create WinRT IDirect3DDevice from native D3D11Device
-    IDXGIDevice* pDxgiDevice = nullptr;
-    HRESULT hr = pDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&pDxgiDevice);
-    if (FAILED(hr)) return false;
-
-    IInspectable* inspectable = nullptr;
-    hr = CreateDirect3D11DeviceFromDXGIDevice(pDxgiDevice, &inspectable);
-    pDxgiDevice->Release();
-    if (FAILED(hr)) return false;
-
-    winrt::copy_from_abi(m_impl->winrtDevice, inspectable);
-    inspectable->Release();
-
-    // Create GraphicsCaptureItem for Monitor
-    auto interop = winrt::get_activation_factory<winrt::Windows::Graphics::Capture::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-    hr = interop->CreateForMonitor(hMonitor, winrt::guid_of<winrt::Windows::Graphics::Capture::GraphicsCaptureItem>(), winrt::put_abi(m_impl->item));
-    if (FAILED(hr) || !m_impl->item) {
-        std::cerr << "[Capture] CreateForMonitor failed: 0x" << std::hex << hr << std::endl;
-        return false;
-    }
-
-    auto sz = m_impl->item.Size();
-    m_width = sz.Width;
-    m_height = sz.Height;
-
-    m_impl->hFrameEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-
-    // Create Frame Pool with 3 buffers (zero-starvation async pipeline)
-    m_impl->framePool = winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
-        m_impl->winrtDevice,
-        winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-        3,
-        sz
-    );
-
-    // Frame arrived callback: drains pool, stores latest frame, signals worker (<0.02ms)
-    m_impl->frameArrivedToken = m_impl->framePool.FrameArrived([this](auto const& sender, auto const&) {
-        if (!m_impl->running) return;
-
-        winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame latestFrame{ nullptr };
-        while (auto frame = sender.TryGetNextFrame()) {
-            m_impl->wgcArrivedCount++;
-            if (latestFrame) {
-                latestFrame.Close();
-            }
-            latestFrame = frame;
-        }
-
-        if (!latestFrame) return;
-
-        {
-            std::lock_guard<std::mutex> lock(m_impl->frameMutex);
-            if (m_impl->pendingFrame) {
-                m_impl->pendingFrame.Close();
-            }
-            m_impl->pendingFrame = latestFrame;
-        }
-        SetEvent(m_impl->hFrameEvent);
-    });
-
-    // Create Session
-    m_impl->session = m_impl->framePool.CreateCaptureSession(m_impl->item);
-
-    // Try enabling hardware cursor if available (Win 10 2004+)
+bool ScreenCapture::Initialize(ID3D11Device* device, HMONITOR monitor, int targetFps, FrameCallback onFrame) {
     try {
-        m_impl->session.IsCursorCaptureEnabled(true);
-    } catch (...) {}
+        auto& state = *m_impl;
+        state.onFrame = std::move(onFrame);
+        state.targetFps = targetFps;
 
-    // Set minimum update interval according to targetFps (unlocked 0ms for 120Hz+, exact interval for lower)
-    try {
-        if (targetFps >= 120) {
-            winrt::Windows::Foundation::TimeSpan interval{ std::chrono::milliseconds(0) };
-            m_impl->session.MinUpdateInterval(interval);
-            std::cout << "[Capture] Unlocked MinUpdateInterval (0ms) for high-refresh " << targetFps << "Hz" << std::endl;
-        } else if (targetFps > 0) {
-            int intervalMs = (int)(1000.0 / targetFps * 0.95);
-            if (intervalMs < 1) intervalMs = 1;
-            winrt::Windows::Foundation::TimeSpan interval{ std::chrono::milliseconds(intervalMs) };
-            m_impl->session.MinUpdateInterval(interval);
-            std::cout << "[Capture] Set MinUpdateInterval to " << intervalMs << "ms (target " << targetFps << "Hz)" << std::endl;
+        winrt::com_ptr<IDXGIDevice> dxgiDevice;
+        winrt::check_hresult(device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put())));
+        winrt::com_ptr<IInspectable> inspectable;
+        winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.get(), inspectable.put()));
+        auto winrtDevice = inspectable.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>();
+
+        auto interop = winrt::get_activation_factory<GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+        winrt::check_hresult(interop->CreateForMonitor(monitor, winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(state.item)));
+        state.size = state.item.Size();
+        m_width = state.size.Width;
+        m_height = state.size.Height;
+        state.frameEvent.attach(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+        state.stopEvent.attach(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        state.paceTimer.attach(CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                      TIMER_MODIFY_STATE | SYNCHRONIZE));
+        if (!state.paceTimer) {
+            state.paceTimer.attach(CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_MODIFY_STATE | SYNCHRONIZE));
         }
-    } catch (...) {}
+        if (!state.frameEvent || !state.stopEvent || !state.paceTimer) return false;
 
-    std::cout << "[Capture] Windows.Graphics.Capture initialized: " << m_width << "x" << m_height << " (3-buffer zero-copy direct handoff)" << std::endl;
-    return true;
-}
-
-void ScreenCapture::Start() {
-    if (m_impl->session && !m_impl->running) {
-        m_impl->running = true;
-
-        // Dedicated high-priority worker thread for encoding
-        m_impl->workerThread = std::thread([this]() {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-            while (m_impl->running) {
-                DWORD wr = WaitForSingleObject(m_impl->hFrameEvent, 10);
-                if (!m_impl->running) break;
-
-                winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame curFrame{ nullptr };
-                {
-                    std::lock_guard<std::mutex> lock(m_impl->frameMutex);
-                    curFrame = m_impl->pendingFrame;
-                    m_impl->pendingFrame = nullptr;
+        state.framePool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            winrtDevice, winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, state.size);
+        std::weak_ptr<Impl> weakState = m_impl;
+        state.arrived = state.framePool.FrameArrived(winrt::auto_revoke, [weakState](auto const& sender, auto const&) {
+            auto state = weakState.lock();
+            if (!state || !state->running) return;
+            try {
+                Direct3D11CaptureFrame latest{ nullptr };
+                while (auto frame = sender.TryGetNextFrame()) {
+                    ++state->arrivedCount;
+                    latest = std::move(frame);
                 }
+                if (!latest) return;
 
-                if (curFrame) {
-                    auto surface = curFrame.Surface();
-                    auto access = surface.as<Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
-
-                    ID3D11Texture2D* pTexture = nullptr;
-                    if (SUCCEEDED(access->GetInterface(IID_PPV_ARGS(&pTexture))) && pTexture) {
-                        if (m_impl->onFrame) {
-                            m_impl->onFrame(pTexture, m_width, m_height);
-                        }
-                        pTexture->Release();
-                    }
-                    curFrame.Close();
-                }
+                std::lock_guard lock(state->frameMutex);
+                if (!state->running) return;
+                state->pendingFrame = std::move(latest);
+                SetEvent(state->frameEvent.get());
+            } catch (const winrt::hresult_error&) {
+                state->healthy = false;
             }
         });
-
-        m_impl->session.StartCapture();
-        std::cout << "[Capture] Capture session started" << std::endl;
+        state.closed = state.item.Closed(winrt::auto_revoke, [weakState](auto const&, auto const&) {
+            if (auto state = weakState.lock()) state->healthy = false;
+        });
+        state.session = state.framePool.CreateCaptureSession(state.item);
+        try { state.session.IsCursorCaptureEnabled(true); } catch (const winrt::hresult_error&) {}
+        try {
+            state.session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ 0 });
+        } catch (const winrt::hresult_error&) {}
+        return true;
+    } catch (const winrt::hresult_error& error) {
+        std::cerr << "[Capture] Initialization failed: " << winrt::to_string(error.message()) << '\n';
+        return false;
     }
+}
+
+bool ScreenCapture::Start() {
+    auto& state = *m_impl;
+    state.running = true;
+    try {
+        state.worker = std::thread([&state]() {
+            try {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                using CaptureTicks = duration<int64_t, std::ratio<1, 10000000>>;
+                const auto interval = CaptureTicks{ 10000000 / state.targetFps };
+                const auto frameWait = std::array{ state.stopEvent.get(), state.frameEvent.get() };
+                const auto paceWait = std::array{ state.stopEvent.get(), state.paceTimer.get() };
+                steady_clock::time_point next{};
+                while (state.running && state.healthy) {
+                    const auto result = WaitForMultipleObjects(static_cast<DWORD>(frameWait.size()),
+                                                               frameWait.data(), FALSE, INFINITE);
+                    if (result == WAIT_OBJECT_0 || !state.running) break;
+                    if (result != WAIT_OBJECT_0 + 1) {
+                        state.healthy = false;
+                        break;
+                    }
+
+                    // At a lower target, sample the newest frame at the deadline. Dropping by
+                    // source timestamp alone made a 180 Hz source alternate 5.6 and 11.1 ms at 120 FPS.
+                    const auto remaining = duration_cast<CaptureTicks>(next - steady_clock::now());
+                    if (remaining > microseconds{ 180 }) {
+                        LARGE_INTEGER due{};
+                        due.QuadPart = -remaining.count();
+                        if (SetWaitableTimer(state.paceTimer.get(), &due, 0, nullptr, nullptr, FALSE)) {
+                            const auto paced = WaitForMultipleObjects(static_cast<DWORD>(paceWait.size()),
+                                                                     paceWait.data(), FALSE, INFINITE);
+                            if (paced == WAIT_OBJECT_0 || !state.running) break;
+                            if (paced != WAIT_OBJECT_0 + 1) {
+                                state.healthy = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    Direct3D11CaptureFrame frame{ nullptr };
+                    {
+                        std::lock_guard lock(state.frameMutex);
+                        frame = std::move(state.pendingFrame);
+                        ResetEvent(state.frameEvent.get());
+                    }
+                    if (!frame) continue;
+                    auto size = frame.ContentSize();
+                    if (size.Width != state.size.Width || size.Height != state.size.Height) {
+                        std::cerr << "[Capture] Monitor size changed, restarting capture\n";
+                        state.healthy = false;
+                        break;
+                    }
+
+                    const auto now = steady_clock::now();
+                    if (now > next + interval / 2) next = now;
+                    next += interval;
+                    auto access = frame.Surface().as<Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+                    winrt::com_ptr<ID3D11Texture2D> texture;
+                    winrt::check_hresult(access->GetInterface(IID_PPV_ARGS(texture.put())));
+                    state.onFrame(texture.get(), size.Width, size.Height);
+                }
+                winrt::uninit_apartment();
+            } catch (const std::exception& error) {
+                std::cerr << "[Capture] Worker failed: " << error.what() << '\n';
+                state.healthy = false;
+            } catch (const winrt::hresult_error& error) {
+                std::cerr << "[Capture] Worker failed: " << winrt::to_string(error.message()) << '\n';
+                state.healthy = false;
+            }
+        });
+        state.session.StartCapture();
+        return true;
+    } catch (const winrt::hresult_error& error) {
+        std::cerr << "[Capture] Start failed: " << winrt::to_string(error.message()) << '\n';
+    } catch (const std::exception& error) {
+        std::cerr << "[Capture] Start failed: " << error.what() << '\n';
+    }
+    Stop();
+    return false;
 }
 
 void ScreenCapture::Stop() {
-    m_impl->running = false;
-    if (m_impl->hFrameEvent) {
-        SetEvent(m_impl->hFrameEvent);
-    }
-    if (m_impl->workerThread.joinable()) {
-        m_impl->workerThread.join();
-    }
-    if (m_impl->hFrameEvent) {
-        CloseHandle(m_impl->hFrameEvent);
-        m_impl->hFrameEvent = NULL;
-    }
+    auto& state = *m_impl;
+    state.running = false;
+    state.arrived.revoke();
+    state.closed.revoke();
+    if (state.stopEvent) SetEvent(state.stopEvent.get());
+    if (state.worker.joinable()) state.worker.join();
     {
-        std::lock_guard<std::mutex> lock(m_impl->frameMutex);
-        if (m_impl->pendingFrame) {
-            m_impl->pendingFrame.Close();
-            m_impl->pendingFrame = nullptr;
-        }
+        std::lock_guard lock(state.frameMutex);
+        state.pendingFrame = nullptr;
+        state.frameEvent.close();
+        state.stopEvent.close();
+        state.paceTimer.close();
     }
-    if (m_impl->session) {
-        try {
-            m_impl->session.Close();
-        } catch (...) {}
-        m_impl->session = nullptr;
+    if (state.session) {
+        try { state.session.Close(); } catch (const winrt::hresult_error&) {}
+        state.session = nullptr;
     }
-    if (m_impl->framePool) {
-        try {
-            m_impl->framePool.FrameArrived(m_impl->frameArrivedToken);
-            m_impl->framePool.Close();
-        } catch (...) {}
-        m_impl->framePool = nullptr;
+    if (state.framePool) {
+        try { state.framePool.Close(); } catch (const winrt::hresult_error&) {}
+        state.framePool = nullptr;
     }
-    if (m_impl->pD3DContext) {
-        m_impl->pD3DContext->Release();
-        m_impl->pD3DContext = nullptr;
-    }
+    state.item = nullptr;
 }

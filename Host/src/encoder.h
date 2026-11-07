@@ -6,6 +6,7 @@
 #include "nvEncodeAPI.h"
 
 #include <unordered_map>
+#include <winrt/base.h>
 
 class NvEncoderD3D11 {
 public:
@@ -13,7 +14,7 @@ public:
     ~NvEncoderD3D11();
 
     bool Initialize(ID3D11Device* pDevice, int width, int height, int fps, int bitrateMbps);
-    bool EncodeFrame(ID3D11Texture2D* pTexture, uint64_t frameIndex, std::vector<uint8_t>& outBitstream, bool& isKeyframe);
+    bool EncodeFrame(ID3D11Texture2D* pTexture, bool forceIdr, std::vector<uint8_t>& outBitstream, bool& isKeyframe);
     void Destroy();
 
     int GetWidth() const { return m_width; }
@@ -31,5 +32,9 @@ private:
 
     NV_ENC_OUTPUT_PTR m_bitstreamBuffer;
     bool m_initialized;
-    std::unordered_map<ID3D11Texture2D*, NV_ENC_REGISTERED_PTR> m_registeredResources;
+    struct RegisteredTexture {
+        winrt::com_ptr<ID3D11Texture2D> texture;
+        NV_ENC_REGISTERED_PTR resource;
+    };
+    std::unordered_map<ID3D11Texture2D*, RegisteredTexture> m_registeredResources;
 };

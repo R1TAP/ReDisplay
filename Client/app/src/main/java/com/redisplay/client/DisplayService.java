@@ -8,7 +8,6 @@ import android.content.Intent;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.PowerManager;
 import android.util.Log;
 
 public class DisplayService extends Service {
@@ -16,7 +15,6 @@ public class DisplayService extends Service {
     private static final String CHANNEL_ID = "redisplay_service_channel";
     private static final int NOTIFICATION_ID = 1001;
 
-    private PowerManager.WakeLock wakeLock;
     private final IBinder binder = new LocalBinder(this);
 
     public static class LocalBinder extends Binder {
@@ -33,13 +31,8 @@ public class DisplayService extends Service {
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
-        startForeground(NOTIFICATION_ID, buildNotification("ReDisplay 服务已就绪"));
+        startForeground(NOTIFICATION_ID, buildNotification(getString(R.string.service_ready)));
 
-        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
-        if (powerManager != null) {
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ReDisplay::WakeLock");
-            wakeLock.acquire(24 * 60 * 60 * 1000L); // 24 hours
-        }
         Log.i(TAG, "DisplayService started in foreground");
     }
 
@@ -54,10 +47,10 @@ public class DisplayService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "ReDisplay Background Service",
+                    getString(R.string.notification_channel),
                     NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("保持有线副屏低延迟传输链路");
+            channel.setDescription(getString(R.string.notification_description));
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
                 manager.createNotificationChannel(channel);
@@ -72,7 +65,7 @@ public class DisplayService extends Service {
         } else {
             builder = new Notification.Builder(this);
         }
-        return builder.setContentTitle("ReDisplay 有线超低延迟副屏")
+        return builder.setContentTitle(getString(R.string.notification_title))
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_menu_gallery)
                 .setOngoing(true)
@@ -81,7 +74,7 @@ public class DisplayService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     @Override
@@ -91,9 +84,6 @@ public class DisplayService extends Service {
 
     @Override
     public void onDestroy() {
-        if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
-        }
         super.onDestroy();
         Log.i(TAG, "DisplayService destroyed");
     }

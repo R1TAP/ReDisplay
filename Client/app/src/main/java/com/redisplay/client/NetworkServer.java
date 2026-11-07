@@ -1,17 +1,30 @@
 package com.redisplay.client;
 
+import android.os.SystemClock;
 import android.util.Log;
+
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.Locale;
 
 public class NetworkServer implements Runnable {
     private static final String TAG = "ReDisplay_Net";
-    public static final int PORT = 27183;
-    public static final int MAGIC = 0x52445350; // "RDSP"
+    public static final int PORT = 27184;
+    private static final int MAGIC = 0x52445350; // RDSP
+    private static final int VIDEO = 1;
+    private static final int CONFIG = 2;
+    private static final int PING = 3;
+    private static final int PONG = 4;
+    private static final int REQUEST_IDR = 5;
+    private static final int READY = 6;
+    private static final int MAX_VIDEO_BYTES = 4 * 1024 * 1024;
 
     public interface StatusListener {
         void onConnected(String hostInfo);
@@ -22,8 +35,9 @@ public class NetworkServer implements Runnable {
 
     private final VideoDecoder decoder;
     private final StatusListener listener;
-    private volatile boolean running = false;
+    private volatile boolean running;
     private ServerSocket serverSocket;
+    private Socket clientSocket;
     private Thread serverThread;
 
     public NetworkServer(VideoDecoder decoder, StatusListener listener) {
@@ -32,140 +46,147 @@ public class NetworkServer implements Runnable {
     }
 
     public synchronized void start() {
-        if (!running) {
-            running = true;
-            serverThread = new Thread(this, "ReDisplay-NetServer");
-            serverThread.start();
-        }
+        if (serverThread != null) return;
+        running = true;
+        serverThread = new Thread(this, "ReDisplay-NetServer");
+        serverThread.start();
     }
 
     public synchronized void stop() {
         running = false;
+        if (clientSocket != null) {
+            try { clientSocket.close(); } catch (IOException ignored) {}
+        }
         if (serverSocket != null) {
-            try {
-                serverSocket.close();
-            } catch (IOException ignored) {}
+            try { serverSocket.close(); } catch (IOException ignored) {}
         }
-        if (serverThread != null) {
-            serverThread.interrupt();
-        }
+        if (serverThread != null) serverThread.interrupt();
     }
 
     @Override
     public void run() {
-        Log.i(TAG, "NetworkServer listening on port " + PORT + "...");
+        byte[] payload = new byte[MAX_VIDEO_BYTES];
         while (running) {
-            try {
-                serverSocket = new ServerSocket(PORT);
-                serverSocket.setReuseAddress(true);
-
+            try (ServerSocket listenerSocket = new ServerSocket()) {
+                synchronized (this) {
+                    if (!running) break;
+                    serverSocket = listenerSocket;
+                }
+                listenerSocket.setReuseAddress(true);
+                listenerSocket.setReceiveBufferSize(256 * 1024);
+                listenerSocket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT));
+                Log.i(TAG, "Listening via ADB on 127.0.0.1:" + PORT);
                 while (running) {
-                    Log.i(TAG, "Waiting for Host connection via ADB tunnel...");
-                    if (listener != null) listener.onDisconnected();
-
-                    Socket socket = serverSocket.accept();
-                    socket.setTcpNoDelay(true);
-                    socket.setReceiveBufferSize(4 * 1024 * 1024); // 4MB buffer for 10Gbps link
-                    socket.setSendBufferSize(64 * 1024);
-
-                    Log.i(TAG, "Host connected from: " + socket.getRemoteSocketAddress());
-                    if (listener != null) listener.onConnected(socket.getRemoteSocketAddress().toString());
-
-                    handleClient(socket);
+                    try (Socket socket = listenerSocket.accept()) {
+                        synchronized (this) {
+                            if (!running) break;
+                            clientSocket = socket;
+                        }
+                        socket.setTcpNoDelay(true);
+                        handleClient(socket, payload);
+                    } catch (EOFException e) {
+                        Log.i(TAG, "Host closed the connection");
+                    } catch (IOException e) {
+                        if (running) Log.w(TAG, "Connection ended: " + e.getMessage());
+                    } finally {
+                        synchronized (this) { clientSocket = null; }
+                        decoder.endStream();
+                        if (running) listener.onDisconnected();
+                    }
                 }
             } catch (IOException e) {
                 if (running) {
-                    Log.w(TAG, "ServerSocket error, restarting: " + e.getMessage());
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ignored) {}
+                    Log.w(TAG, "Listener failed: " + e.getMessage());
+                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
                 }
             } finally {
-                if (serverSocket != null && !serverSocket.isClosed()) {
-                    try {
-                        serverSocket.close();
-                    } catch (IOException ignored) {}
-                }
+                synchronized (this) { serverSocket = null; }
             }
         }
     }
 
-    private void handleClient(Socket socket) {
-        byte[] buffer = new byte[1024 * 1024 * 4]; // 4MB frame buffer
-        long lastStatTime = System.currentTimeMillis();
-        long totalBytesInSec = 0;
-        long rxVideoFrames = 0;
+    private void handleClient(Socket socket, byte[] payload) throws IOException {
+        DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 64 * 1024));
+        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+        boolean configured = false;
+        long lastStatTime = SystemClock.elapsedRealtime();
+        long lastIdrRequest = -100;
+        long bytes = 0;
+        long received = 0;
+        long lastRendered = 0;
 
-        try (DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 1024 * 512));
-             DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+        while (running) {
+            if (in.readInt() != MAGIC) throw new IOException("Invalid packet magic");
+            int type = in.readUnsignedByte();
+            int flags = in.readUnsignedByte();
+            in.readUnsignedShort(); // reserved
+            long timestampUs = in.readLong();
+            int size = in.readInt();
 
-            while (running && !socket.isClosed()) {
-                // Read 4-byte Magic
-                int magic = in.readInt();
-                if (magic != MAGIC) {
-                    Log.e(TAG, "Invalid magic: " + Integer.toHexString(magic) + ", resyncing...");
-                    break;
+            if (type == CONFIG && size == 12 && !configured) {
+                int w = in.readInt();
+                int h = in.readInt();
+                int fps = in.readInt();
+                if (w <= 0 || w > 8192 || h <= 0 || h > 8192 || fps <= 0 || fps > 240) {
+                    throw new IOException("Invalid stream dimensions or refresh rate");
                 }
-
-                // Header fields
-                int packetType = in.readUnsignedByte();
-                int flags = in.readUnsignedByte();
-                in.readShort(); // reserved
-                long timestampUs = in.readLong();
-                int payloadSize = in.readInt();
-
-                if (payloadSize < 0 || payloadSize > buffer.length) {
-                    Log.e(TAG, "Illegal payload size: " + payloadSize);
-                    break;
+                configured = true;
+                Log.i(TAG, "Config received: " + w + "x" + h + " @" + fps + "Hz");
+                listener.onResolutionChanged(w, h, fps);
+                decoder.reconfigure(w, h, fps);
+                try {
+                    if (!decoder.waitUntilReady()) throw new IOException("Decoder did not become ready");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for decoder", e);
                 }
-
-                // Read exact payload
-                in.readFully(buffer, 0, payloadSize);
-                totalBytesInSec += payloadSize + 20;
-
-                if (packetType == 1) { // Video Frame
-                    rxVideoFrames++;
-                    boolean isKeyFrame = (flags & 0x01) != 0;
-                    decoder.decode(buffer, 0, payloadSize, timestampUs, isKeyFrame);
-                } else if (packetType == 2) { // Config / Resolution Change
-                    if (payloadSize >= 12) {
-                        int w = ((buffer[0] & 0xFF) << 24) | ((buffer[1] & 0xFF) << 16) | ((buffer[2] & 0xFF) << 8) | (buffer[3] & 0xFF);
-                        int h = ((buffer[4] & 0xFF) << 24) | ((buffer[5] & 0xFF) << 16) | ((buffer[6] & 0xFF) << 8) | (buffer[7] & 0xFF);
-                        int fps = ((buffer[8] & 0xFF) << 24) | ((buffer[9] & 0xFF) << 16) | ((buffer[10] & 0xFF) << 8) | (buffer[11] & 0xFF);
-                        Log.i(TAG, "Config received: " + w + "x" + h + " @" + fps + "Hz");
-                        decoder.reconfigure(w, h, fps);
-                        if (listener != null) listener.onResolutionChanged(w, h, fps);
+                sendControl(out, READY, 0);
+                lastStatTime = SystemClock.elapsedRealtime();
+                listener.onConnected(socket.getRemoteSocketAddress().toString());
+            } else if (type == VIDEO && configured && size > 0 && size <= payload.length) {
+                in.readFully(payload, 0, size);
+                received++;
+                long presentationTimeUs = System.nanoTime() / 1000;
+                if (!decoder.decode(payload, size, presentationTimeUs, (flags & 1) != 0)) {
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - lastIdrRequest >= 100) {
+                        sendControl(out, REQUEST_IDR, 0);
+                        lastIdrRequest = now;
                     }
-                } else if (packetType == 3) { // Ping / Pong for latency measurement
-                    out.writeInt(MAGIC);
-                    out.writeByte(3); // Pong
-                    out.writeByte(0);
-                    out.writeShort(0);
-                    out.writeLong(timestampUs);
-                    out.writeInt(0);
-                    out.flush();
                 }
-
-                // Periodic stats update
-                long now = System.currentTimeMillis();
-                if (now - lastStatTime >= 1000) {
-                    double elapsedSec = (now - lastStatTime) / 1000.0;
-                    int bitrateKbps = (int) (totalBytesInSec * 8 / 1024 / elapsedSec);
-                    float rxFps = (float) (rxVideoFrames / elapsedSec);
-                    Log.i(TAG, "[Stage 5 Android TCP] Recv: " + String.format(java.util.Locale.US, "%.1f", rxFps) + " FPS (" + String.format(java.util.Locale.US, "%.1f", bitrateKbps / 1000.0f) + " Mbps)");
-                    if (listener != null) listener.onStatsUpdate(decoder.getFps(), bitrateKbps);
-                    totalBytesInSec = 0;
-                    rxVideoFrames = 0;
-                    lastStatTime = now;
-                }
+            } else if (type == PING && size == 0) {
+                sendControl(out, PONG, timestampUs);
+            } else {
+                throw new IOException("Invalid packet type/size: " + type + "/" + size);
             }
-        } catch (IOException e) {
-            Log.i(TAG, "Client disconnected: " + e.getMessage());
-        } finally {
-            try {
-                socket.close();
-            } catch (IOException ignored) {}
-            if (listener != null) listener.onDisconnected();
+
+            bytes += size + 20;
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastStatTime >= 1000) {
+                double seconds = (now - lastStatTime) / 1000.0;
+                long rendered = decoder.getRenderedFrames();
+                int kbps = (int) (bytes * 8 / 1000 / seconds);
+                float decodedFps = (float) ((rendered - lastRendered) / seconds);
+                double[] p95 = decoder.takeTimingP95Ms();
+                Log.i(TAG, String.format(Locale.US,
+                        "[Android] TCP %.1f FPS | Decoder %.1f FPS | %.1f Mbps | Decode drops %d | Decode P95 %.2f ms | Surface submit gap P95 %.2f ms",
+                        received / seconds, decodedFps, kbps / 1000.0, decoder.getDroppedFrames(), p95[0], p95[1]));
+                listener.onStatsUpdate(decodedFps, kbps);
+                lastRendered = rendered;
+                bytes = 0;
+                received = 0;
+                lastStatTime = now;
+            }
         }
+    }
+
+    private void sendControl(DataOutputStream out, int type, long timestampUs) throws IOException {
+        out.writeInt(MAGIC);
+        out.writeByte(type);
+        out.writeByte(0);
+        out.writeShort(0);
+        out.writeLong(timestampUs);
+        out.writeInt(0);
+        out.flush();
     }
 }

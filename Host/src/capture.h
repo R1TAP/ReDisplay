@@ -12,16 +12,17 @@ public:
     ~ScreenCapture();
 
     bool Initialize(ID3D11Device* pDevice, HMONITOR hMonitor, int targetFps, FrameCallback onFrame);
-    void Start();
+    bool Start();
     void Stop();
 
     int GetWidth() const { return m_width; }
     int GetHeight() const { return m_height; }
     uint64_t GetArrivedFrameCount() const;
+    bool IsHealthy() const;
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> m_impl;
+    std::shared_ptr<Impl> m_impl;
     int m_width;
     int m_height;
 };

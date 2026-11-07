@@ -1,98 +1,129 @@
 #include "adb.h"
 #include <windows.h>
+#include <charconv>
+#include <cstdint>
 #include <iostream>
 #include <sstream>
-#include <vector>
 
 AdbManager::AdbManager() {
     FindAdbPath();
 }
 
 bool AdbManager::FindAdbPath() {
-    // 1. Current directory
-    if (GetFileAttributesA("adb.exe") != INVALID_FILE_ATTRIBUTES) {
-        m_adbPath = "adb.exe";
+    wchar_t buffer[32768];
+    const DWORD length = GetEnvironmentVariableW(L"REDISPLAY_ADB", buffer, _countof(buffer));
+    if (length > 0) {
+        if (length >= _countof(buffer) || GetFileAttributesW(buffer) == INVALID_FILE_ATTRIBUTES) return false;
+        m_adbPath = buffer;
         return true;
     }
-    // 2. Relative resources/bin directory
-    const char* relPaths[] = {
-        "resources\\bin\\adb.exe",
-        "..\\resources\\bin\\adb.exe",
-        "..\\ReDisplay-Win64\\resources\\bin\\adb.exe",
-        "bin\\adb.exe",
-        "..\\bin\\adb.exe"
+
+    const wchar_t* candidates[] = {
+        L"adb.exe",
+        L"resources\\bin\\adb.exe",
+        L"..\\resources\\bin\\adb.exe",
+        L"..\\Release\\ReDisplay-Win64\\resources\\bin\\adb.exe",
+        L"bin\\adb.exe",
+        L"..\\bin\\adb.exe",
+        L"C:\\Program Files\\QtScrcpy-win-x64-v3.2.0\\adb.exe"
     };
-    for (const char* p : relPaths) {
-        if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) {
-            char fullP[MAX_PATH];
-            GetFullPathNameA(p, MAX_PATH, fullP, NULL);
-            m_adbPath = fullP;
-            return true;
+    for (const auto* candidate : candidates) {
+        if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES) {
+            const DWORD size = GetFullPathNameW(candidate, _countof(buffer), buffer, nullptr);
+            if (size > 0 && size < _countof(buffer)) {
+                m_adbPath = buffer;
+                return true;
+            }
         }
     }
-    // 3. QtScrcpy path
-    const char* qtPath = "C:\\Program Files\\QtScrcpy-win-x64-v3.2.0\\adb.exe";
-    if (GetFileAttributesA(qtPath) != INVALID_FILE_ATTRIBUTES) {
-        m_adbPath = qtPath;
-        return true;
-    }
-    // 4. System PATH
-    char buffer[MAX_PATH];
-    if (SearchPathA(NULL, "adb.exe", NULL, MAX_PATH, buffer, NULL) > 0) {
+    const DWORD size = SearchPathW(nullptr, L"adb.exe", nullptr, _countof(buffer), buffer, nullptr);
+    if (size > 0 && size < _countof(buffer)) {
         m_adbPath = buffer;
         return true;
     }
     return false;
 }
 
-std::string AdbManager::ExecuteCommand(const std::string& cmd) {
-    if (m_adbPath.empty()) return "";
+bool AdbManager::ExecuteCommand(const std::string& cmd, std::string& output) {
+    if (m_adbPath.empty()) return false;
 
-    std::string fullCmd = "\"" + m_adbPath + "\" " + cmd;
-    std::string result;
+    const std::wstring command = L"\"" + m_adbPath + L"\" " + std::wstring(cmd.begin(), cmd.end());
+    std::wstring writableCommand = command;
+    SECURITY_ATTRIBUTES attributes{ sizeof(attributes), nullptr, TRUE };
+    HANDLE readPipe = nullptr;
+    HANDLE writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &attributes, 0)) return false;
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
 
-    HANDLE hStdOutPipeRead = NULL;
-    HANDLE hStdOutPipeWrite = NULL;
+    HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               &attributes, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = input;
+    startup.StartupInfo.hStdOutput = writePipe;
+    startup.StartupInfo.hStdError = writePipe;
 
-    SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
-    if (!CreatePipe(&hStdOutPipeRead, &hStdOutPipeWrite, &sa, 0)) return "";
-    SetHandleInformation(hStdOutPipeRead, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOA si = { sizeof(STARTUPINFOA) };
-    si.dwFlags |= STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.hStdOutput = hStdOutPipeWrite;
-    si.hStdError = hStdOutPipeWrite;
-    si.wShowWindow = SW_HIDE;
-
-    PROCESS_INFORMATION pi = { 0 };
-    std::vector<char> cmdVec(fullCmd.begin(), fullCmd.end());
-    cmdVec.push_back(0);
-
-    if (CreateProcessA(NULL, cmdVec.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        CloseHandle(hStdOutPipeWrite);
-        hStdOutPipeWrite = NULL;
-
-        char buf[1024];
-        DWORD bytesRead = 0;
-        while (ReadFile(hStdOutPipeRead, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
-            buf[bytesRead] = 0;
-            result += buf;
+    SIZE_T attributeBytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+    std::vector<uint8_t> attributeStorage(attributeBytes);
+    startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
+    PROCESS_INFORMATION process{};
+    BOOL started = FALSE;
+    if (input != INVALID_HANDLE_VALUE && InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attributeBytes)) {
+        // The ADB server must never inherit Electron's Host stdout or stdin pipe.
+        HANDLE inherited[]{ input, writePipe };
+        if (UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                      inherited, sizeof(inherited), nullptr, nullptr)) {
+            started = CreateProcessW(m_adbPath.c_str(), writableCommand.data(), nullptr, nullptr, TRUE,
+                                     CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                                     &startup.StartupInfo, &process);
         }
-
-        WaitForSingleObject(pi.hProcess, 3000);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    } else {
-        CloseHandle(hStdOutPipeWrite);
+        DeleteProcThreadAttributeList(startup.lpAttributeList);
+    }
+    CloseHandle(writePipe);
+    if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
+    if (!started) {
+        CloseHandle(readPipe);
+        return false;
     }
 
-    CloseHandle(hStdOutPipeRead);
-    return result;
+    CloseHandle(process.hThread);
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    bool timedOut = false;
+    for (;;) {
+        DWORD available = 0;
+        if (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
+            char buffer[4096];
+            DWORD received = 0;
+            if (!ReadFile(readPipe, buffer, (std::min)(available, static_cast<DWORD>(sizeof(buffer))), &received, nullptr)) break;
+            output.append(buffer, received);
+        } else if (WaitForSingleObject(process.hProcess, 10) == WAIT_OBJECT_0) {
+            // A child may have written to the pipe just before it exited.
+            if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) || available == 0) break;
+        }
+        if (GetTickCount64() >= deadline || output.size() > 1024 * 1024) {
+            timedOut = true;
+            break;
+        }
+    }
+
+    DWORD exitCode = 1;
+    if (timedOut || WaitForSingleObject(process.hProcess, 100) != WAIT_OBJECT_0) {
+        TerminateProcess(process.hProcess, 1);
+        std::cerr << "[ADB] Command timed out or exceeded the output limit\n";
+    } else {
+        GetExitCodeProcess(process.hProcess, &exitCode);
+    }
+    CloseHandle(readPipe);
+    CloseHandle(process.hProcess);
+    return exitCode == 0;
 }
 
 std::vector<AdbDevice> AdbManager::GetDevices() {
     std::vector<AdbDevice> devices;
-    std::string output = ExecuteCommand("devices -l");
+    std::string output;
+    if (!ExecuteCommand("devices -l", output)) return devices;
     std::istringstream stream(output);
     std::string line;
 
@@ -125,21 +156,47 @@ std::vector<AdbDevice> AdbManager::GetDevices() {
     return devices;
 }
 
-bool AdbManager::SetupPortForward(const std::string& serial, int hostPort, int devicePort) {
-    std::string cmd = "-s " + serial + " forward tcp:" + std::to_string(hostPort) + " tcp:" + std::to_string(devicePort);
-    std::string out = ExecuteCommand(cmd);
-    return true;
+
+static bool IsValidSerial(const std::string& serial) {
+    return !serial.empty() &&
+           serial.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-[]%") == std::string::npos;
+}
+
+int AdbManager::SetupPortForward(const std::string& serial, int hostPort, int devicePort) {
+    std::string output;
+    if (!IsValidSerial(serial) ||
+        !ExecuteCommand("-s " + serial + " forward --no-rebind tcp:" + std::to_string(hostPort) +
+                        " tcp:" + std::to_string(devicePort), output)) {
+        std::cerr << "[ADB] Forward failed: " << output << '\n';
+        return 0;
+    }
+    if (hostPort != 0) return hostPort;
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        int assignedPort = 0;
+        auto [end, error] = std::from_chars(line.data(), line.data() + line.size(), assignedPort);
+        if (error == std::errc{} && end == line.data() + line.size() &&
+            assignedPort > 0 && assignedPort <= 65535) return assignedPort;
+    }
+    std::cerr << "[ADB] Forward did not report the allocated port: " << output << '\n';
+    return 0;
+}
+
+void AdbManager::RemovePortForward(const std::string& serial, int hostPort) {
+    std::string output;
+    ExecuteCommand("-s " + serial + " forward --remove tcp:" + std::to_string(hostPort), output);
 }
 
 bool AdbManager::LaunchClientApp(const std::string& serial) {
-    WakeDevice(serial);
-    std::string cmd = "-s " + serial + " shell am start -n com.redisplay.client/.MainActivity";
-    ExecuteCommand(cmd);
-    return true;
-}
-
-bool AdbManager::WakeDevice(const std::string& serial) {
-    std::string cmd = "-s " + serial + " shell input keyevent KEYCODE_WAKEUP";
-    ExecuteCommand(cmd);
-    return true;
+    if (!IsValidSerial(serial)) return false;
+    const std::string prefix = "-s " + serial + " shell ";
+    std::string output;
+    ExecuteCommand(prefix + "input keyevent KEYCODE_WAKEUP", output);
+    output.clear();
+    if (ExecuteCommand(prefix + "am start -W -n com.redisplay.client.demo/com.redisplay.client.MainActivity", output) &&
+        output.find("Status: ok") != std::string::npos) return true;
+    std::cerr << "[ADB] Android launch failed: " << output << '\n';
+    return false;
 }

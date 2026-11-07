@@ -12,7 +12,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
-import android.view.Choreographer;
 import android.view.Display;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
@@ -37,6 +36,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     private final Handler handler = new Handler(Looper.getMainLooper());
     private GestureDetector gestureDetector;
     private Runnable hideOverlayRunnable;
+    private Intent serviceIntent;
+    private boolean serviceBound;
+    private boolean destroyed;
+    private int streamFps = 120;
 
     private final ServiceConnection serviceConn = new ServiceConnection() {
         @Override
@@ -64,19 +67,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         }
 
         // Support cutout to draw behind camera hole
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             WindowManager.LayoutParams lp = getWindow().getAttributes();
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
             getWindow().setAttributes(lp);
         }
 
-        // Lock refresh rate to 120Hz
-        setup120HzRefreshRate();
-
-        // Initialize persistent Decoder and Network Server
-        decoder = new VideoDecoder(2800, 1752);
-        server = new NetworkServer(decoder, this);
-        server.start();
+        decoder = new VideoDecoder();
 
         // Build UI
         FrameLayout rootLayout = new FrameLayout(this);
@@ -97,7 +94,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         statsOverlay.setTextSize(13);
         statsOverlay.setPadding(30, 30, 30, 30);
         statsOverlay.setBackgroundColor(Color.parseColor("#80000000"));
-        statsOverlay.setText("ReDisplay 等待主机连接...\n端口: 27183 | 双击屏幕切换全屏/保持比例");
+        statsOverlay.setText(getString(R.string.waiting, NetworkServer.PORT));
         statsOverlay.setVisibility(View.VISIBLE);
         FrameLayout.LayoutParams overlayParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -112,6 +109,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
 
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
+            public boolean onDown(MotionEvent e) { return true; }
+
+            @Override
             public boolean onSingleTapConfirmed(MotionEvent e) {
                 toggleStatsOverlay();
                 return true;
@@ -120,68 +120,60 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
             @Override
             public boolean onDoubleTap(MotionEvent e) {
                 DisplaySurfaceView.ScaleMode newMode = surfaceView.toggleScaleMode();
-                String modeText = (newMode == DisplaySurfaceView.ScaleMode.FIT) ? "保持比例居中 (FIT)" :
-                                  (newMode == DisplaySurfaceView.ScaleMode.FILL) ? "等比裁剪铺满 (FILL)" : "全屏强制拉伸 (STRETCH)";
-                showTemporaryMessage("画面模式: " + modeText);
+                showTemporaryMessage(getString(R.string.scale_mode, scaleLabel(newMode)));
                 return true;
             }
         });
 
         rootLayout.setOnTouchListener((v, event) -> gestureDetector.onTouchEvent(event));
 
-        // Bind Foreground Service
-        Intent intent = new Intent(this, DisplayService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
-        bindService(intent, serviceConn, Context.BIND_AUTO_CREATE);
-
-        // Stage 7 Read-only Probe: Choreographer VSYNC measurement
-        Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
-            private int vSyncCount = 0;
-            private long lastVsyncLog = System.currentTimeMillis();
-
-            @Override
-            public void doFrame(long frameTimeNanos) {
-                vSyncCount++;
-                long now = System.currentTimeMillis();
-                if (now - lastVsyncLog >= 1000) {
-                    double elapsedSec = (now - lastVsyncLog) / 1000.0;
-                    float vsyncFps = (float) (vSyncCount / elapsedSec);
-                    Display d = getDisplay();
-                    float modeFps = (d != null && d.getMode() != null) ? d.getMode().getRefreshRate() : 0.0f;
-                    Log.i(TAG, "[Stage 7 Choreographer] VSync: " + String.format(java.util.Locale.US, "%.1f", vsyncFps) + " Hz | Active Display Mode: " + modeFps + " Hz");
-                    vSyncCount = 0;
-                    lastVsyncLog = now;
-                }
-                Choreographer.getInstance().postFrameCallback(this);
-            }
-        });
+        serviceIntent = new Intent(this, DisplayService.class);
+        startForegroundService(serviceIntent);
+        serviceBound = bindService(serviceIntent, serviceConn, Context.BIND_AUTO_CREATE);
+        server = new NetworkServer(decoder, this);
+        server.start();
     }
 
-    private void setup120HzRefreshRate() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Display display = getDisplay();
-            if (display != null) {
-                Display.Mode[] modes = display.getSupportedModes();
-                Display.Mode bestMode = null;
-                float maxFps = 0.0f;
-                for (Display.Mode mode : modes) {
-                    if (mode.getRefreshRate() > maxFps) {
-                        maxFps = mode.getRefreshRate();
-                        bestMode = mode;
-                    }
-                }
-                if (bestMode != null && maxFps >= 119.0f) {
-                    WindowManager.LayoutParams lp = getWindow().getAttributes();
-                    lp.preferredDisplayModeId = bestMode.getModeId();
-                    getWindow().setAttributes(lp);
-                    Log.i(TAG, "Locked display mode to: " + bestMode.getPhysicalWidth() + "x" + bestMode.getPhysicalHeight() + " @" + maxFps + "Hz");
-                }
+    private String scaleLabel(DisplaySurfaceView.ScaleMode mode) {
+        switch (mode) {
+            case FIT: return getString(R.string.scale_fit);
+            case FILL: return getString(R.string.scale_fill);
+            default: return getString(R.string.scale_stretch);
+        }
+    }
+
+    private void applyStreamRefreshRate() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+        Display display = getDisplay();
+        if (display == null) return;
+
+        Display.Mode current = display.getMode();
+        Display.Mode best = current;
+        double bestScore = Double.MAX_VALUE;
+        for (Display.Mode mode : display.getSupportedModes()) {
+            if (mode.getPhysicalWidth() != current.getPhysicalWidth() ||
+                    mode.getPhysicalHeight() != current.getPhysicalHeight()) continue;
+            float refresh = mode.getRefreshRate();
+            double score = Math.abs(refresh - streamFps);
+            if (refresh < streamFps - 0.5f) score += 1000;
+            if (score < bestScore) {
+                best = mode;
+                bestScore = score;
             }
         }
+
+        WindowManager.LayoutParams params = getWindow().getAttributes();
+        params.preferredDisplayModeId = best.getModeId();
+        getWindow().setAttributes(params);
+        Surface surface = surfaceView.getHolder().getSurface();
+        if (surface.isValid()) {
+            try {
+                surface.setFrameRate(Math.min(streamFps, best.getRefreshRate()), Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Display refresh hint unavailable", e);
+            }
+        }
+        Log.i(TAG, "Refresh request: stream " + streamFps + " Hz, panel mode " + best.getRefreshRate() + " Hz");
     }
 
     private void applyFullscreenImmersive() {
@@ -238,15 +230,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i(TAG, "Surface created, attaching to decoder");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                holder.getSurface().setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT, Surface.CHANGE_FRAME_RATE_ALWAYS);
-            } catch (Exception ignored) {
-                holder.getSurface().setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
-            }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            holder.getSurface().setFrameRate(120.0f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
-        }
+        applyStreamRefreshRate();
         decoder.setSurface(holder.getSurface());
     }
 
@@ -264,12 +248,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onConnected(String hostInfo) {
         handler.post(() -> {
-            statsOverlay.setText("已连接: " + hostInfo + "\n接收视频流中 (120Hz)...");
+            if (destroyed) return;
+            statsOverlay.setText(getString(R.string.connected, hostInfo, streamFps));
             statsOverlay.setVisibility(View.VISIBLE);
             handler.removeCallbacks(hideOverlayRunnable);
             handler.postDelayed(hideOverlayRunnable, 2500);
             if (displayService != null) {
-                displayService.updateNotificationText("副屏运行中 (" + hostInfo + ")");
+                displayService.updateNotificationText(getString(R.string.stream_running, hostInfo));
             }
         });
     }
@@ -277,10 +262,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onDisconnected() {
         handler.post(() -> {
-            statsOverlay.setText("主机已断开，等待重新连接...\n端口: 27183");
+            if (destroyed) return;
+            handler.removeCallbacks(hideOverlayRunnable);
+            statsOverlay.setText(getString(R.string.disconnected, NetworkServer.PORT));
             statsOverlay.setVisibility(View.VISIBLE);
             if (displayService != null) {
-                displayService.updateNotificationText("等待主机连接...");
+                displayService.updateNotificationText(getString(R.string.waiting_notification));
             }
         });
     }
@@ -288,6 +275,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onResolutionChanged(int width, int height, int fps) {
         handler.post(() -> {
+            if (destroyed) return;
+            streamFps = fps;
+            applyStreamRefreshRate();
             surfaceView.setVideoSize(width, height);
             if (height > width) {
                 setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
@@ -300,28 +290,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     public void onStatsUpdate(float fps, int bitrateKbps) {
         handler.post(() -> {
-            if (statsOverlay.getVisibility() == View.VISIBLE) {
-                statsOverlay.setText(String.format(
-                        "ReDisplay [10Gbps USB 有线链路]\n帧率: %.1f FPS | 码率: %.1f Mbps\n缩放: %s (双击切换)",
-                        fps,
-                        bitrateKbps / 1000.0f,
-                        surfaceView.getScaleMode().name()
-                ));
+            if (!destroyed && statsOverlay.getVisibility() == View.VISIBLE) {
+                statsOverlay.setText(getString(R.string.stream_stats,
+                        fps, bitrateKbps / 1000.0f, scaleLabel(surfaceView.getScaleMode())));
             }
         });
     }
 
     @Override
     protected void onDestroy() {
-        if (serviceConn != null) {
-            unbindService(serviceConn);
-        }
-        if (server != null) {
-            server.stop();
-        }
-        if (decoder != null) {
-            decoder.release();
-        }
+        destroyed = true;
+        handler.removeCallbacksAndMessages(null);
+        if (server != null) server.stop();
+        if (decoder != null) decoder.release();
+        if (serviceBound) unbindService(serviceConn);
+        if (serviceIntent != null) stopService(serviceIntent);
         super.onDestroy();
     }
 }

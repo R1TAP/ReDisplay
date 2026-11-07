@@ -6,10 +6,11 @@ contextBridge.exposeInMainWorld('api', {
     maximizeWindow: () => ipcRenderer.send('window-maximize'),
     closeWindow: () => ipcRenderer.send('window-close'),
     hideToTray: () => ipcRenderer.send('window-hide-to-tray'),
+    setLanguage: language => ipcRenderer.send('set-language', language),
 
     // Service controls
     startStream: (config) => ipcRenderer.invoke('start-stream', config),
-    stopStream: (serial) => ipcRenderer.invoke('stop-stream', serial),
+    stopStream: () => ipcRenderer.invoke('stop-stream'),
     restartStream: (config) => ipcRenderer.invoke('restart-stream', config),
     getServiceStatus: () => ipcRenderer.invoke('get-service-status'),
 
@@ -41,6 +42,11 @@ contextBridge.exposeInMainWorld('api', {
         return () => ipcRenderer.removeListener('stream-status', handler);
     },
     notifyConfigChanged: (config) => ipcRenderer.send('config-changed', config),
+    onClientInstalled: (callback) => {
+        const handler = (event, serial) => callback(serial);
+        ipcRenderer.on('client-installed', handler);
+        return () => ipcRenderer.removeListener('client-installed', handler);
+    },
     onTrayAction: (callback) => {
         const handler = (event, data) => callback(data);
         ipcRenderer.on('tray-action', handler);
