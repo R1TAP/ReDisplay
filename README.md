@@ -60,6 +60,8 @@ ReDisplay 是一套开源、全链路硬件加速的超低延迟有线副屏拓�
 - **连接线材（建议）**: USB 3.2 Gen 2 (或更高)
 > 需要 [Visual C++ x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)。
 
+>需要 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)
+
 ### 2. 启动服务
 - 访问 Releases 下载 `ReDisplay-v1.2.0-Win64.zip`，解压后双击运行 `ReDisplay.exe` 即可打开控制面板。
 - 首次运行服务可能需要提升的管理员身份以**安装虚拟屏幕驱动/为安卓设备推送APK**
