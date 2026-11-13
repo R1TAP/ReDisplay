@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, powerMonitor, shell } = require('electron');
 const path = require('path');
 const os = require('os');
+const { findAdb, resolveAdbFolder, validateAdb, installPlatformTools, platformToolsPage } = require('./adb-tools');
 const profiles = require('./profiles');
 const { summarizeTrace, parseLayerLatency, summarizePresentation } = require('./telemetry');
 const { version, clientVersion = version } = require('./package.json');
@@ -21,6 +22,8 @@ let mainWindow = null;
 let tray = null;
 let hostProcess = null;
 let driverChanging = false;
+let adbChanging = false;
+let selectedAdb = '';
 let isQuitting = false;
 let quitRequested = false;
 let requestId = 0;
@@ -61,23 +64,44 @@ function getHostExePath() {
 }
 
 function getAdbPath() {
-    const candidates = [
-        ...(process.env.REDISPLAY_ADB ? [process.env.REDISPLAY_ADB] : []),
-        path.join(__dirname, '..', 'bin', 'adb.exe'),
-        path.join(__dirname, 'resources', 'bin', 'adb.exe'),
-        path.join(__dirname, '..', 'resources', 'bin', 'adb.exe'),
-        ...[process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT].filter(Boolean)
-            .map(sdk => path.join(sdk, 'platform-tools', 'adb.exe')),
-        path.join(__dirname, '..', 'Release', 'Archive', 'ReDisplay-Win64', 'resources', 'bin', 'adb.exe'),
-        'C:\\Program Files\\QtScrcpy-win-x64-v3.2.0\\adb.exe',
-        path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk', 'platform-tools', 'adb.exe')
-    ];
-    candidates.push(...(process.env.PATH || '').split(path.delimiter).filter(Boolean)
-        .map(dir => path.join(dir.replace(/^"|"$/g, ''), 'adb.exe')));
-    for (const p of candidates) {
-        if (fs.existsSync(p)) return path.resolve(p);
+    const packaged = path.basename(path.dirname(__dirname)) === 'resources';
+    return findAdb({
+        appDirectory: packaged ? path.dirname(app.getPath('exe')) : path.dirname(__dirname),
+        resourcesDirectory: packaged ? process.resourcesPath : path.join(__dirname, 'resources'),
+        managedDirectory: managedAdbDirectory,
+        selectedPath: selectedAdb
+    });
+}
+
+async function changeAdb(useDownload) {
+    if (adbChanging || driverChanging || streamStatus !== 'idle' || hostProcess) {
+        return { error: t('请先停止串流或等待当前设置完成。') };
     }
-    return '';
+    adbChanging = true;
+    try {
+        let exe;
+        if (useDownload) {
+            exe = await installPlatformTools(managedAdbDirectory);
+        } else {
+            const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+                title: t('选择 Platform-Tools 文件夹'),
+                properties: ['openDirectory'],
+                defaultPath: getAdbPath() ? path.dirname(getAdbPath()) : app.getPath('downloads')
+            });
+            if (canceled) return { canceled: true };
+            exe = resolveAdbFolder(filePaths[0]);
+            if (!await validateAdb(exe)) return { error: t('请选择包含 adb.exe 和配套 DLL 的完整 Platform-Tools 文件夹。') };
+        }
+        const staged = adbSelectionFile + '.tmp';
+        await fs.promises.writeFile(staged, JSON.stringify({ path: exe }), 'utf8');
+        await fs.promises.rename(staged, adbSelectionFile);
+        selectedAdb = exe;
+        return { path: exe };
+    } catch (error) {
+        return { error: error.stderr?.trim() || error.message };
+    } finally {
+        adbChanging = false;
+    }
 }
 
 function getApkPath() {
@@ -390,7 +414,7 @@ async function checkDriverStatus() {
 
 async function manageDriver(action, selectedSerial) {
     if (!['install', 'update', 'uninstall'].includes(action)) return { success: false, error: t('无效的驱动操作') };
-    if (driverChanging || streamStatus !== 'idle' || hostProcess) {
+    if (driverChanging || adbChanging || streamStatus !== 'idle' || hostProcess) {
         return { success: false, error: t('请先停止串流，再更新虚拟显示驱动。') };
     }
     const script = getDriverScriptPath(action);
@@ -592,6 +616,7 @@ function releaseHost() {
 }
 
 async function startHostProcess(config, resume = false) {
+    if (adbChanging) return { success: false, error: t('正在配置 ADB，请稍后再启动。') };
     if (driverChanging) return { success: false, error: t('正在更新虚拟显示驱动，请稍后再启动。') };
     const id = ++requestId;
     streamStatus = 'connecting';
@@ -608,7 +633,7 @@ async function startHostProcess(config, resume = false) {
         return { success: false, error };
     };
     if (!fs.existsSync(exe)) return failed(t('未找到 Host，请构建 Host 或运行完整发行包。'));
-    if (!getAdbPath()) return failed(t('未找到 ADB'));
+    if (!getAdbPath()) return failed(t('未找到 ADB，请在连接页设置。'));
 
     const devices = config.serial ? [] : await queryHost('--list-devices', 'devices');
     if (id !== requestId || quitRequested) return { success: false, cancelled: true };
@@ -758,6 +783,14 @@ app.setName('ReDisplay 1.2');
 const profileDirectory = path.join(app.getPath('appData'), 'ReDisplay-v1.2.0-demo');
 fs.mkdirSync(profileDirectory, { recursive: true });
 app.setPath('userData', profileDirectory);
+const managedAdbDirectory = path.join(profileDirectory, 'adb', 'platform-tools');
+const adbSelectionFile = path.join(profileDirectory, 'adb-selection.json');
+try {
+    const stored = JSON.parse(fs.readFileSync(adbSelectionFile, 'utf8'));
+    if (typeof stored?.path === 'string' && path.isAbsolute(stored.path)) selectedAdb = stored.path;
+} catch {
+    // A missing or invalid saved path falls back to automatic discovery.
+}
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
     app.quit();
@@ -819,6 +852,10 @@ if (!gotTheLock) {
         ipcMain.handle('get-displays', () => queryHost('--list-displays', 'displays'));
         ipcMain.handle('get-devices', () => queryHost('--list-devices', 'devices'));
         ipcMain.handle('get-device-states', getDeviceStates);
+        ipcMain.handle('get-adb-path', () => getAdbPath());
+        ipcMain.handle('choose-adb-folder', () => changeAdb(false));
+        ipcMain.handle('download-adb', () => changeAdb(true));
+        ipcMain.handle('open-adb-download-page', () => shell.openExternal(platformToolsPage));
         ipcMain.handle('export-performance-report', exportPerformanceReport);
         ipcMain.handle('get-gpu-info', async () => {
             const displays = await queryHost('--list-displays', 'displays');

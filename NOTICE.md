@@ -30,7 +30,7 @@ ReDisplay incorporates or interfaces with the following third-party components:
 - **Terms & Conditions**: https://developer.android.com/studio/terms
 - **Notice**:
   ADB (Android Debug Bridge) is a component of the Android SDK Platform-Tools.
-  ReDisplay forwards the video stream through an ADB tunnel. The public release uses the platform-tools installation supplied by the user through ANDROID_HOME, ANDROID_SDK_ROOT, PATH, or REDISPLAY_ADB.
+  ReDisplay forwards the video stream through an ADB tunnel. The Windows app can use an existing Platform-Tools installation or download the official archive from Google on request. The release ZIP does not bundle ADB.
 
 ---
 

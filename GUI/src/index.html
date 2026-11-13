@@ -15,7 +15,7 @@
         <div class="brand">
             <img src="../assets/icon.png" width="22" height="22" alt="">
             <span>ReDisplay</span>
-            <span class="version-tag">v1.2.0</span>
+            <span class="version-tag">v1.2.1</span>
         </div>
         <div class="window-controls">
             <button id="btn-tray-min" class="icon-button" data-label="隐藏至托盘">
@@ -116,6 +116,11 @@
                     </div>
                     <section class="page-section">
                         <h2 data-t="连接检查">连接检查</h2>
+                        <div class="check-row">
+                            <span>ADB</span>
+                            <span class="check-result"><span id="dot-adb" class="health-dot" aria-hidden="true"></span><span id="val-adb" role="status"></span></span>
+                            <button id="btn-status-adb" class="text-button" data-t="设置 ADB">设置 ADB</button>
+                        </div>
                         <div class="check-row">
                             <span data-t="Android 应用">Android 应用</span>
                             <span class="check-result"><span id="dot-apk" class="health-dot" aria-hidden="true"></span><span id="val-apk"></span></span>
@@ -349,5 +354,17 @@
             </div>
         </main>
     </div>
+    <dialog id="adb-dialog" aria-labelledby="adb-title">
+        <h2 id="adb-title" data-t="设置 ADB">设置 ADB</h2>
+        <p id="adb-location" class="field-hint"></p>
+        <p data-t="已解压可直接选择 platform-tools 文件夹。下载后会自动配置并刷新设备。">已解压可直接选择 platform-tools 文件夹。下载后会自动配置并刷新设备。</p>
+        <div class="adb-actions">
+            <button id="btn-adb-folder" class="outlined-button" data-t="选择文件夹">选择文件夹</button>
+            <button id="btn-adb-download" class="filled-button small" data-t="同意并下载">同意并下载</button>
+        </div>
+        <p class="field-hint"><button id="btn-adb-link" class="text-button" data-t="查看 Google 下载页面与条款">查看 Google 下载页面与条款</button></p>
+        <p id="adb-progress" class="field-hint" role="status"></p>
+        <form method="dialog"><button class="text-button" data-t="关闭">关闭</button></form>
+    </dialog>
 </body>
 </html>

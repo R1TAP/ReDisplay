@@ -66,4 +66,5 @@ Desktop.ini
 .DS_Store
 /docs/
 /Tests/
+/Release/
 CHANGELOG.md

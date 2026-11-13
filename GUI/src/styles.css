@@ -232,6 +232,19 @@ main {
 }
 .check-row > button { justify-self: end; }
 #driver-feedback { margin-top: 8px; }
+#adb-dialog {
+    width: min(460px, calc(100% - 40px));
+    padding: 22px;
+    border: 1px solid var(--outline);
+    border-radius: 16px;
+    background: var(--surface-low);
+    color: var(--on-surface);
+}
+#adb-dialog::backdrop { background: #0007; }
+#adb-dialog > :not(:first-child) { margin-top: 12px; }
+#adb-dialog .adb-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#adb-dialog form { display: flex; justify-content: flex-end; }
+#adb-progress:empty { display: none; }
 #btn-refresh-devices, #btn-refresh-displays { min-inline-size: 84px; }
 .check-result { display: flex; align-items: center; gap: 7px; min-width: 0; overflow-wrap: anywhere; color: var(--muted); }
 

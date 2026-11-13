@@ -23,7 +23,7 @@
 
 ReDisplay 是一套开源、全链路硬件加速的超低延迟有线副屏拓展系统。基于高速 USB 3.2 Type-C 线缆，将安卓设备无缝接入 Windows ，作为原生高刷新率副屏。
 
-## 🎉 版本更新 V1.2.0 ！
+## 🎉 版本更新 V1.2 ！
 
 ### 与 V1.1.0 相比：
 
@@ -63,8 +63,10 @@ ReDisplay 是一套开源、全链路硬件加速的超低延迟有线副屏拓�
 >需要 [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools)
 
 ### 2. 启动服务
-- 访问 Releases 下载 `ReDisplay-v1.2.0-Win64.zip`，解压后双击运行 `ReDisplay.exe` 即可打开控制面板。
+- 访问 Releases 下载 `ReDisplay-v1.2.1-Win64.zip`，解压后双击运行 `ReDisplay.exe` 即可打开控制面板。
 - 首次运行服务可能需要提升的管理员身份以**安装虚拟屏幕驱动/为安卓设备推送APK**
+- 首次使用可于「连接 → 设置 ADB → 同意并下载」从 Google 下载最新Android SDK Platform-Tools，也可自行配置或选择含 adb.exe 的 platform-tools 文件夹。
+
 
 ## 📊 实测数据
 

@@ -127,6 +127,9 @@
     let devices = [];
     let displays = [];
     let deviceProbe = 0;
+    let adbPath;
+    let adbBusy = false;
+    let deviceLoading = false;
     let driverInfo;
     let driverBusy = false;
     let resolutionChosen = false;
@@ -232,13 +235,18 @@
     }
 
     async function loadDevices() {
+        if (deviceLoading) return;
+        deviceLoading = true;
         const refresh = $('btn-refresh-devices');
         refresh.disabled = true;
+        renderAdbStatus();
         showText(refresh.id, '刷新中…');
         try {
             const previous = controls.device.value;
             const priorDevice = devices.find(d => d.serial === previous);
-            devices = await api.getDevices();
+            adbPath = await api.getAdbPath();
+            renderAdbStatus();
+            devices = adbPath ? await api.getDevices() : [];
             if (serviceActive && priorDevice && !devices.some(d => d.serial === previous)) {
                 devices = [...devices, { ...priorDevice, waiting: true }];
             }
@@ -257,7 +265,9 @@
                 appendLog(t('未找到已授权的 Android 设备。'), 'warn');
             }
             await inspectDevice(controls.device.value);
-            if (!preferred) {
+            if (!preferred && !adbPath) {
+                showText('device-hint', '请先在下方设置 ADB，再连接 Android 设备。');
+            } else if (!preferred) {
                 const result = await api.getDeviceStates();
                 const message = result.error ? 'ADB 检查失败 · {error}'
                     : result.states.includes('unauthorized') ? '请在 Android 上允许 USB 调试。'
@@ -268,8 +278,10 @@
         } catch (error) {
             appendLog(t('设备检查失败 · {error}', { error: error.message }), 'error');
         } finally {
+            deviceLoading = false;
             refresh.disabled = false;
             showText(refresh.id, '刷新');
+            renderAdbStatus();
         }
     }
 
@@ -278,6 +290,61 @@
         settingsChanged();
     });
     $('btn-refresh-devices').addEventListener('click', loadDevices);
+
+    function renderAdbStatus() {
+        if (adbPath === undefined) showText('val-adb', '检查中…');
+        else showText('val-adb', adbPath ? '已就绪' : '未找到 ADB');
+        $('dot-adb').dataset.state = adbPath ? 'ready' : adbPath === '' ? 'warning' : '';
+        $('val-adb').title = adbPath || '';
+        showText('adb-location', adbPath ? '{path}' : '未找到 ADB', { path: adbPath });
+        for (const id of ['btn-adb-folder', 'btn-adb-download']) {
+            $(id).disabled = adbBusy || deviceLoading || serviceActive || stopping || driverBusy;
+        }
+    }
+
+    function openAdbSetup() {
+        renderAdbStatus();
+        if (!$('adb-dialog').open) $('adb-dialog').showModal();
+    }
+
+    async function configureAdb(download) {
+        if (adbBusy || deviceLoading || serviceActive || stopping || driverBusy) return;
+        adbBusy = true;
+        $('btn-refresh-devices').disabled = true;
+        renderAdbStatus();
+        const progress = $('adb-progress');
+        progress.classList.remove('warning');
+        showText(progress.id, download ? '正在下载并安装 Google Platform-Tools…' : '');
+        try {
+            const result = await (download ? api.downloadAdb() : api.chooseAdbFolder());
+            if (result.canceled) return;
+            if (result.error) throw new Error(result.error);
+            adbPath = result.path;
+            await loadDevices();
+            $('adb-dialog').close();
+            showText(progress.id, '');
+        } catch (error) {
+            progress.classList.add('warning');
+            showText(progress.id, 'ADB 设置失败 · {error}', { error: error.message });
+        } finally {
+            adbBusy = false;
+            $('btn-refresh-devices').disabled = deviceLoading;
+            renderAdbStatus();
+        }
+    }
+
+    $('btn-status-adb').addEventListener('click', openAdbSetup);
+    $('btn-adb-folder').addEventListener('click', () => configureAdb(false));
+    $('btn-adb-download').addEventListener('click', () => configureAdb(true));
+    $('btn-adb-link').addEventListener('click', async () => {
+        try {
+            await api.openAdbDownloadPage();
+        } catch (error) {
+            const progress = $('adb-progress');
+            progress.classList.add('warning');
+            showText(progress.id, 'ADB 设置失败 · {error}', { error: error.message });
+        }
+    });
 
     function renderUsbResult() {
         const serial = controls.device.value;
@@ -719,6 +786,7 @@
         }
         renderPresentation();
         renderDriverAction();
+        renderAdbStatus();
     }
 
     function settingsChanged() {
@@ -849,7 +917,12 @@
     $('btn-reconfig-revert').addEventListener('click', () => revertPreview());
 
     async function startStream() {
-        if (serviceActive || stopping || driverBusy) return;
+        if (serviceActive || stopping || driverBusy || adbBusy) return;
+        if (adbPath === '') {
+            showPage('connect');
+            openAdbSetup();
+            return;
+        }
         savedConfig = streamConfig();
         serviceActive = true;
         applying = true;

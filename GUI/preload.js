@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('api', {
     // Detection & Hardware
     getDevices: () => ipcRenderer.invoke('get-devices'),
     getDeviceStates: () => ipcRenderer.invoke('get-device-states'),
+    getAdbPath: () => ipcRenderer.invoke('get-adb-path'),
+    chooseAdbFolder: () => ipcRenderer.invoke('choose-adb-folder'),
+    downloadAdb: () => ipcRenderer.invoke('download-adb'),
+    openAdbDownloadPage: () => ipcRenderer.invoke('open-adb-download-page'),
     exportPerformanceReport: () => ipcRenderer.invoke('export-performance-report'),
     onReportAvailable: callback => ipcRenderer.on('report-available', () => callback()),
     getDisplays: () => ipcRenderer.invoke('get-displays'),

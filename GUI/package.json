@@ -1,6 +1,8 @@
 {
   "name": "redisplay-gui",
-  "version": "1.2.0",
+  "version": "1.2.1",
+  "hostVersion": "1.2.0",
+  "clientVersion": "1.2.0",
   "description": "Ultra-Low Latency Wired Secondary Display System",
   "main": "main.js",
   "type": "commonjs",
