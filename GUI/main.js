@@ -1,5 +1,9 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, dialog, powerMonitor } = require('electron');
 const path = require('path');
+const os = require('os');
+const profiles = require('./profiles');
+const { summarizeTrace, parseLayerLatency, summarizePresentation } = require('./telemetry');
+const { version, clientVersion = version } = require('./package.json');
 const { translate } = require('./i18n');
 let language = 'zh-CN';
 const t = (key, values) => translate(language, key, values);
@@ -9,23 +13,26 @@ const fs = require('fs');
 const { randomBytes } = require('crypto');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
-const CLIENT_PACKAGE = 'com.redisplay.client.demo';
+const CLIENT_PACKAGE = 'com.redisplay.client.v120demo';
+const MAX_HOST_SAMPLES = 1800;
+const MAX_CLIENT_SAMPLES = 900;
 
 let mainWindow = null;
 let tray = null;
 let hostProcess = null;
+let driverChanging = false;
 let isQuitting = false;
 let quitRequested = false;
 let requestId = 0;
 let hostShutdown = Promise.resolve();
 let currentConfig = {
-    profile: 'esports',
+    profile: 'balanced',
     fps: 180,
     bitrate: 60,
-    width: 1752,
-    height: 2800,
+    width: 1920,
+    height: 1080,
     bufferMode: 'lowlatency',
-    orientation: 'portrait'
+    orientation: 'landscape'
 };
 let latestStats = { fps: 0, mbps: 0, encodeMs: 0, dropped: 0, frames: 0 };
 let streamStatus = 'idle'; // 'idle', 'connecting', 'streaming'
@@ -33,13 +40,17 @@ let activeStreamDeviceName = '';
 let activeStreamSerial = '';
 let hasShownTrayTip = false;
 let lastTrayUpdateTime = 0;
+let performanceReport = null;
+let lastReport = null;
+let activeHostConfig;
+let suspendedStream;
 
 // Dynamic Path Resolution
 function getHostExePath() {
     const candidates = [
         path.join(__dirname, '..', 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, 'resources', 'bin', 'ReDisplayHost.exe'),
-        path.join(__dirname, '..', 'scratch', 'demo', 'bin', 'ReDisplayHost.exe'),
+        path.join(__dirname, '..', 'scratch', 'release-v120', 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, 'ReDisplayHost.exe')
     ];
@@ -51,10 +62,10 @@ function getHostExePath() {
 
 function getAdbPath() {
     const candidates = [
+        ...(process.env.REDISPLAY_ADB ? [process.env.REDISPLAY_ADB] : []),
         path.join(__dirname, '..', 'bin', 'adb.exe'),
         path.join(__dirname, 'resources', 'bin', 'adb.exe'),
         path.join(__dirname, '..', 'resources', 'bin', 'adb.exe'),
-        ...(process.env.REDISPLAY_ADB ? [process.env.REDISPLAY_ADB] : []),
         ...[process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT].filter(Boolean)
             .map(sdk => path.join(sdk, 'platform-tools', 'adb.exe')),
         path.join(__dirname, '..', 'Release', 'Archive', 'ReDisplay-Win64', 'resources', 'bin', 'adb.exe'),
@@ -71,7 +82,7 @@ function getAdbPath() {
 
 function getApkPath() {
     const candidates = [
-        path.join(__dirname, '..', 'scratch', 'demo', 'Client', 'ReDisplay.apk'),
+        path.join(__dirname, '..', 'scratch', 'release-v120', 'Client', 'ReDisplay.apk'),
         ...(path.basename(path.dirname(__dirname)) === 'resources' ? [path.join(__dirname, '..', 'Client', 'ReDisplay.apk')] : []),
         path.join(__dirname, 'resources', 'Client', 'ReDisplay.apk'),
         path.join(__dirname, 'Client', 'ReDisplay.apk')
@@ -83,7 +94,7 @@ function getApkPath() {
 }
 
 function getDriverScriptPath(action) {
-    const scriptName = (action === 'uninstall') ? 'uninstall_driver.bat' : 'install_driver.bat';
+    const scriptName = action === 'uninstall' ? 'uninstall_driver.bat' : 'install_driver.ps1';
     const candidates = [
         path.join(__dirname, '..', 'Driver', scriptName),
         path.join(__dirname, 'resources', 'Driver', scriptName),
@@ -102,7 +113,7 @@ function createWindow() {
         : path.join(__dirname, 'assets', 'icon.png');
 
     mainWindow = new BrowserWindow({
-        title: 'ReDisplay',
+        title: 'ReDisplay 1.2',
         width: 840,
         height: 590,
         minWidth: 660,
@@ -142,11 +153,13 @@ function createWindow() {
 }
 
 function sendTrayConfigChange(patch) {
-    currentConfig = { ...currentConfig, ...patch };
-    updateTrayMenu();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('tray-action', { action: 'change-config', config: currentConfig });
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (streamStatus !== 'idle') {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
     }
+    sendToWindow('tray-action', { action: 'change-config', config: patch });
 }
 
 function updateTrayMenu() {
@@ -155,20 +168,14 @@ function updateTrayMenu() {
     const streaming = streamStatus === 'streaming';
     const active = streamStatus !== 'idle';
     const status = t(streaming ? '串流中' : active ? '正在连接' : '待机就绪');
-    const fps = (latestStats.fps ?? currentConfig.fps).toFixed(1) + ' FPS';
-    const bitrate = (latestStats.mbps ?? currentConfig.bitrate).toFixed(1) + ' Mbps';
-    const headline = streaming ? status + ' · ' + fps + ' · ' + bitrate : status;
+    const headline = streaming && Number.isFinite(latestStats.fps)
+        ? status + ' · ' + t('发送 {fps} FPS', { fps: latestStats.fps.toFixed(1) }) + ' · ' + latestStats.mbps.toFixed(1) + ' Mbps'
+        : status;
     tray.setToolTip('ReDisplay · ' + headline);
 
-    const profiles = [
-        { profile: 'esports', name: '高帧率', fps: 180, bitrate: 60, bufferMode: 'lowlatency' },
-        { profile: 'quality', name: '高画质', fps: 120, bitrate: 85, bufferMode: 'lowlatency' },
-        { profile: 'office', name: '低码率', fps: 60, bitrate: 30, bufferMode: 'smooth' }
-    ];
-    const resolutions = [
-        [1752, 2800], [2800, 1752], [1600, 2560], [2560, 1600],
-        [1200, 1920], [1920, 1200], [1080, 1920], [1920, 1080]
-    ];
+    const resolutions = [[currentConfig.width, currentConfig.height],
+        ...(currentConfig.resolutions || [])];
+    const uniqueResolutions = new Map(resolutions.map(size => [size.join('x'), size]));
     const template = [{ label: headline, enabled: false }];
     if (streaming) {
         const width = currentConfig.actualWidth || currentConfig.width;
@@ -193,16 +200,16 @@ function updateTrayMenu() {
         },
         {
             label: t('串流预设'),
-            submenu: profiles.map(({ name, ...config }) => ({
-                label: t(name) + ' · ' + config.fps + ' FPS / ' + config.bitrate + ' Mbps',
+            submenu: Object.entries(profiles).map(([profile, { name }]) => ({
+                label: t(name),
                 type: 'radio',
-                checked: currentConfig.profile === config.profile,
-                click: () => sendTrayConfigChange(config)
+                checked: currentConfig.profile === profile,
+                click: () => sendTrayConfigChange({ profile })
             }))
         },
         {
             label: t('副屏分辨率'),
-            submenu: resolutions.map(([width, height]) => ({
+            submenu: [...uniqueResolutions.values()].map(([width, height]) => ({
                 label: width + ' × ' + height + ' · ' + t(height > width ? '竖屏' : '横屏'),
                 type: 'radio',
                 checked: currentConfig.width === width && currentConfig.height === height,
@@ -282,12 +289,24 @@ async function queryHost(arg, key) {
     }
 }
 
+async function getDeviceStates() {
+    try {
+        const { stdout } = await runAdb('', ['devices', '-l']);
+        const states = stdout.split(/\r?\n/).map(line => line.match(/^\S+\s+(device|unauthorized|offline)\b/))
+            .filter(Boolean).map(match => match[1]);
+        return { states };
+    } catch (error) {
+        return { states: [], error: error.stderr?.trim() || error.message };
+    }
+}
+
 async function checkClientInstalled(serial) {
     try {
-        const { stdout } = await runAdb(serial, ['shell', 'pm', 'path', CLIENT_PACKAGE]);
-        return { installed: stdout.includes('package:') };
+        const { stdout } = await runAdb(serial, ['shell', 'dumpsys', 'package', CLIENT_PACKAGE]);
+        const installedVersion = stdout.match(/^\s*versionName=(\S+)/m)?.[1];
+        return { installed: Boolean(installedVersion), version: installedVersion,
+            update: Boolean(installedVersion && installedVersion !== clientVersion) };
     } catch (e) {
-        if (e.code === 1 && !e.stderr?.trim() && !e.stdout?.trim()) return { installed: false };
         return { installed: false, error: e.stderr?.trim() || e.message };
     }
 }
@@ -296,15 +315,22 @@ async function installClientApk(serial) {
     const apk = getApkPath();
     if (!apk) return { success: false, error: t('未找到 Android APK。') };
     try {
-        await runAdb(serial, ['install', '-r', apk], 90000);
+        await runAdb(serial, ['install', '--no-incremental', '-r', apk], 90000);
         return { success: true, message: t('Android 应用安装成功') };
     } catch (e) {
-        return { success: false, error: e.stderr?.trim() || e.stdout?.trim() || e.message };
+        const detail = e.stderr?.trim() || e.stdout?.trim() || e.message;
+        if (detail.includes('INSTALL_FAILED_USER_RESTRICTED')) {
+            return { success: false, error: t('请在 Android 上确认通过 USB 安装，然后重试。') };
+        }
+        if (detail.includes('INSTALL_FAILED_UPDATE_INCOMPATIBLE')) {
+            return { success: false, error: t('Android 已安装不同签名的版本。请使用原签名构建，或在设备上卸载旧版后重试。') };
+        }
+        return { success: false, error: detail };
     }
 }
 
 async function detectDeviceSpecs(serial) {
-    const unknown = { width: 0, height: 0, fps: 60, usbTier: 'USB 链路未知' };
+    const unknown = { width: 0, height: 0, fps: 0, usbTier: 'USB 链路未知' };
     try {
         const { stdout } = await runAdb(serial, ['shell',
             "wm size; dumpsys display | grep 'DisplayDeviceInfo'; cat /sys/class/udc/*/current_speed 2>/dev/null; true"]);
@@ -317,7 +343,7 @@ async function detectDeviceSpecs(serial) {
         else if (/^high-speed\s*$/m.test(stdout)) usbTier = 'USB High-Speed (480 Mbps)';
         else if (/^full-speed\s*$/m.test(stdout)) usbTier = 'USB Full-Speed (12 Mbps)';
         return { width: Number(size?.[1] || 0), height: Number(size?.[2] || 0),
-            fps: Math.round(Math.max(60, ...modeRates)), usbTier };
+            fps: Math.round(Math.max(0, ...modeRates)), usbTier };
     } catch {
         return unknown;
     }
@@ -335,9 +361,8 @@ async function testUsbSpeed(serial) {
         const started = process.hrtime.bigint();
         await runAdb(serial, ['push', '-Z', file, remote], 30000);
         const seconds = Number(process.hrtime.bigint() - started) / 1e9;
-        const speedMBps = Math.round(bytes / seconds / 100000) / 10;
-        const estimatedTier = speedMBps > 300 ? 'USB 3.2 Gen 2 档' : speedMBps > 80 ? 'USB 3.0 档' : 'USB 2.0 档';
-        return { success: true, speedMBps, estimatedTier };
+        const speedMbps = bytes * 8 / seconds / 1_000_000;
+        return { success: true, speedMbps };
     } catch (e) {
         return { success: false, error: e.stderr?.trim() || e.message };
     } finally {
@@ -350,34 +375,210 @@ async function testUsbSpeed(serial) {
     }
 }
 
-async function checkDriverStatus() {
+async function getDriverInfo() {
     try {
-        const { stdout } = await execFileAsync(getHostExePath(), ['--driver-status'], hostOptions());
-        return stdout.trim() === 'true';
+        const { stdout } = await execFileAsync(getHostExePath(), ['--driver-info'], hostOptions());
+        return JSON.parse(stdout);
     } catch {
-        return false;
+        return { present: false, started: false, version: '' };
     }
 }
 
-async function manageDriver(action) {
-    if (action !== 'install' && action !== 'uninstall') return { success: false, error: t('无效的驱动操作') };
-    const batPath = getDriverScriptPath(action);
-    if (!batPath) return { success: false, error: t('未找到驱动脚本文件') };
+async function checkDriverStatus() {
+    return (await getDriverInfo()).started;
+}
+
+async function manageDriver(action, selectedSerial) {
+    if (!['install', 'update', 'uninstall'].includes(action)) return { success: false, error: t('无效的驱动操作') };
+    if (driverChanging || streamStatus !== 'idle' || hostProcess) {
+        return { success: false, error: t('请先停止串流，再更新虚拟显示驱动。') };
+    }
+    const script = getDriverScriptPath(action);
+    if (!script) return { success: false, error: t('未找到驱动脚本文件') };
+    driverChanging = true;
     try {
-        await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-            '$p = Start-Process -FilePath $env:REDISPLAY_DRIVER_SCRIPT -ArgumentList "--quiet" -Verb RunAs -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop; exit $p.ExitCode'
-        ], { env: { ...process.env, REDISPLAY_DRIVER_SCRIPT: batPath }, windowsHide: true });
+        let native = null;
+        if (action !== 'uninstall') {
+            const devices = await queryHost('--list-devices', 'devices');
+            const device = selectedSerial ? devices.find(d => d.serial === selectedSerial)
+                : devices.find(d => d.is_tablet) || devices[0];
+            if (device) {
+                const { width, height } = await detectDeviceSpecs(device.serial);
+                if ([width, height].every(n => Number.isInteger(n) && n >= 2 && n <= 4096 && n % 2 === 0)) {
+                    native = { width, height };
+                }
+            }
+            if (action === 'update' && !native) return { success: false, error: t('未读取到设备的可用原生分辨率。') };
+        }
+
+        const command = action === 'uninstall'
+            ? '$p = Start-Process -FilePath $env:REDISPLAY_DRIVER_SCRIPT -ArgumentList "--quiet" -Verb RunAs -WindowStyle Hidden -PassThru -Wait; exit $p.ExitCode'
+            : '$p = Start-Process -FilePath "powershell.exe" -ArgumentList $env:REDISPLAY_DRIVER_ARGS -Verb RunAs -WindowStyle Hidden -PassThru -Wait; exit $p.ExitCode';
+        const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', '"' + script + '"'];
+        if (native) args.push('-DeviceWidth', String(native.width), '-DeviceHeight', String(native.height));
+        if (action === 'update') args.push('-UpdateOnly');
+        await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference = "Stop"; ' + command], {
+            env: { ...process.env, REDISPLAY_DRIVER_SCRIPT: script, REDISPLAY_DRIVER_ARGS: args.join(' ') }, windowsHide: true
+        });
         const active = await checkDriverStatus();
-        if (active !== (action === 'install')) return { success: false, error: t('驱动状态未达到预期，请检查 Windows 设备管理器。') };
-        return { success: true };
+        if (active !== (action !== 'uninstall')) return { success: false, error: t('驱动状态未达到预期，请检查 Windows 设备管理器。') };
+        if (native) {
+            for (let attempt = 0; attempt < 5; attempt++) {
+                const displays = await queryHost('--list-displays', 'displays');
+                const modes = displays.filter(display => display.isVirtual).flatMap(display => display.modes || []);
+                const hasMode = (width, height) => modes.some(mode => mode.width === width && mode.height === height);
+                if (hasMode(native.width, native.height) && hasMode(native.height, native.width)) {
+                    return { success: true, native };
+                }
+                if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 350));
+            }
+            return { success: false, error: t('已写入设备分辨率，但 Windows 尚未列出对应模式。请检查虚拟屏是否已设为扩展。') };
+        }
+        return { success: true, native };
     } catch (e) {
         return { success: false, error: t('驱动操作未完成（{error}）', { error: e.code || e.message }) };
+    } finally {
+        driverChanging = false;
+    }
+}
+
+function endReport() {
+    if (!performanceReport || performanceReport.endedAt) return;
+    performanceReport.endedAt = new Date().toISOString();
+    if (performanceReport.hostSamples.length) lastReport = performanceReport;
+}
+
+function addSample(samples, data, limit) {
+    samples.push({ ...data, time: new Date().toISOString() });
+    if (samples.length > limit) samples.shift();
+}
+
+async function samplePresentation(serial, report) {
+    let layer;
+    let lastPresent = 0;
+    let samples = [];
+    let nextSummaryAt = Date.now() + 3000;
+    const current = () => performanceReport === report && !report.endedAt;
+    while (current()) {
+        try {
+            if (!layer) {
+                const { stdout } = await runAdb(serial, ['shell', 'dumpsys SurfaceFlinger --list'], 2500);
+                const entry = stdout.split(/\r?\n/).find(line => line.includes('SurfaceView[') &&
+                    line.includes(CLIENT_PACKAGE + '/') && line.includes('(BLAST)'));
+                layer = entry?.replace(/^RequestedLayerState\{/, '').split(' parentId=')[0];
+            }
+            if (layer && current()) {
+                const quoted = "'" + layer.replaceAll("'", "'\"'\"'") + "'";
+                const { stdout } = await runAdb(serial, ['shell', 'dumpsys SurfaceFlinger --latency ' + quoted], 2500);
+                const observed = parseLayerLatency(stdout);
+                if (observed.length === 0) layer = null;
+                const fresh = observed.filter(point => point[0] > lastPresent);
+                if (fresh.length) {
+                    lastPresent = Math.max(...fresh.map(point => point[0]));
+                    samples.push(...fresh);
+                }
+            }
+        } catch {
+            layer = null;
+        }
+        if (current() && Date.now() >= nextSummaryAt) {
+            const result = summarizePresentation(samples);
+            if (result.samples > 0) addSample(report.presentation, result, MAX_CLIENT_SAMPLES);
+            sendToWindow('stream-event', { type: 'presentation', metrics: result });
+            samples = samples.length ? [samples.reduce((last, point) => point[0] > last[0] ? point : last)] : [];
+            nextSummaryAt = Date.now() + 3000;
+        }
+        await new Promise(resolve => setTimeout(resolve, 650));
+    }
+}
+
+async function sampleGpu(report) {
+    const current = () => performanceReport === report && !report.endedAt;
+    while (current()) {
+        try {
+            const { stdout } = await execFileAsync('nvidia-smi.exe', [
+                '--query-gpu=index,name,driver_version,utilization.gpu,utilization.encoder,temperature.gpu,memory.used',
+                '--format=csv,noheader,nounits'
+            ], { timeout: 2500, windowsHide: true });
+            if (!current()) return;
+            const adapters = stdout.trim().split(/\r?\n/).filter(Boolean).map(line => {
+                const [index, name, driver, gpu, encoder, temperature, memory] = line.split(',').map(value => value.trim());
+                const number = value => value && Number.isFinite(Number(value)) ? Number(value) : null;
+                return { index: number(index), name, driver, gpuPercent: number(gpu), encoderPercent: number(encoder),
+                    temperatureC: number(temperature), memoryMiB: number(memory) };
+            });
+            if (adapters.length) {
+                addSample(report.gpuSamples, { adapters }, 450);
+                sendToWindow('stream-event', { type: 'gpu_stats', adapters });
+            }
+        } catch {
+            return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+}
+
+function collectTrace(report, data) {
+    const trace = report.trace;
+    if (data.type === 'clock_sync') {
+        addSample(trace.clocks, data, 65);
+        const summary = summarizeTrace(trace.host.slice(-12), trace.client.slice(-12), trace.clocks.slice(-9));
+        sendToWindow('stream-event', { type: 'trace_summary', metrics: summary });
+    } else {
+        const batches = data.type === 'host_trace' ? trace.host : trace.client;
+        batches.push(data.frames);
+        if (batches.length > 130) batches.shift();
+    }
+}
+
+async function exportPerformanceReport() {
+    const source = performanceReport?.hostSamples.length ? performanceReport : lastReport;
+    if (!source) return { error: t('当前没有可导出的性能数据。') };
+    const report = structuredClone(source);
+    const now = new Date();
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+        title: t('导出性能报告'),
+        defaultPath: `ReDisplay-${version}-${now.toISOString().replaceAll(':', '-')}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (canceled) return { canceled: true };
+    try {
+        const { stdout } = await execFileAsync('nvidia-smi.exe', [
+            '--query-gpu=name,driver_version', '--format=csv,noheader'
+        ], { timeout: 3000, windowsHide: true });
+        report.windows.nvidiaAdapters = stdout.trim().split(/\r?\n/).filter(Boolean);
+    } catch {
+        report.windows.nvidiaAdapters = [];
+    }
+    report.windows.virtualDriver = await getDriverInfo();
+    const last = report.hostSamples.at(-1);
+    const seconds = report.hostSamples.reduce((total, sample) => total + sample.windowMs, 0) / 1000;
+    if (report.trace) {
+        report.trace.summary = summarizeTrace(report.trace.host, report.trace.client, report.trace.clocks);
+    }
+    report.summary = {
+        durationSeconds: (Date.parse(report.endedAt ?? now.toISOString()) - Date.parse(report.startedAt)) / 1000,
+        sampledSeconds: seconds,
+        sentFrames: last.frames,
+        sentBytes: last.bytes,
+        meanSampledMbps: seconds > 0 ? report.hostSamples.reduce((total, sample) =>
+            total + sample.mbps * sample.windowMs / 1000, 0) / seconds : null,
+        peakSampledMbps: Math.max(...report.hostSamples.map(sample => sample.mbps)),
+        senderDrops: last.dropped,
+        wgcSuperseded: last.wgcSuperseded
+    };
+    try {
+        await fs.promises.writeFile(filePath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+        return { success: true };
+    } catch (error) {
+        return { error: error.message };
     }
 }
 
 function releaseHost() {
     const child = hostProcess;
     if (!child) return hostShutdown;
+    endReport();
     hostProcess = null;
     hostShutdown = new Promise(resolve => {
         const timer = setTimeout(() => child.kill(), 12000);
@@ -390,7 +591,8 @@ function releaseHost() {
     return hostShutdown;
 }
 
-async function startHostProcess(config) {
+async function startHostProcess(config, resume = false) {
+    if (driverChanging) return { success: false, error: t('正在更新虚拟显示驱动，请稍后再启动。') };
     const id = ++requestId;
     streamStatus = 'connecting';
     updateTrayMenu();
@@ -411,27 +613,39 @@ async function startHostProcess(config) {
     const devices = config.serial ? [] : await queryHost('--list-devices', 'devices');
     if (id !== requestId || quitRequested) return { success: false, cancelled: true };
     const serial = config.serial || (devices.find(d => d.is_tablet) || devices[0])?.serial;
-    if (!serial) return failed(t('请连接并授权 Android 设备，然后刷新设备列表。'));
+    if (!serial) {
+        const detected = await getDeviceStates();
+        if (detected.error) return failed(t('ADB 检查失败 · {error}', { error: detected.error }));
+        if (detected.states.includes('unauthorized')) return failed(t('请在 Android 上允许 USB 调试。'));
+        if (detected.states.includes('offline')) return failed(t('ADB 设备离线，请重新连接 USB。'));
+        return failed(t('请连接并授权 Android 设备，然后刷新设备列表。'));
+    }
 
-    const check = await checkClientInstalled(serial);
-    if (id !== requestId || quitRequested) return { success: false, cancelled: true };
-    if (!check.installed) {
-        sendToWindow('stream-event', { type: 'state', status: 'connecting', phase: 'installing', message: t('正在安装 Android 应用') });
-        const installed = await installClientApk(serial);
+    if (!resume) {
+        const check = await checkClientInstalled(serial);
         if (id !== requestId || quitRequested) return { success: false, cancelled: true };
-        if (!installed.success) return failed(installed.error);
-        sendToWindow('client-installed', serial);
+        if (check.error) return failed(t('Android 应用检查失败 · {error}', { error: check.error }));
+        if (check.update) return failed(t('Android 应用版本不匹配，请在连接页更新。'));
+        if (!check.installed) {
+            sendToWindow('stream-event', { type: 'state', status: 'connecting', phase: 'installing', message: t('正在安装 Android 应用') });
+            const installed = await installClientApk(serial);
+            if (id !== requestId || quitRequested) return { success: false, cancelled: true };
+            if (!installed.success) return failed(installed.error);
+            sendToWindow('client-installed', serial);
+        }
     }
 
     const args = ['--gui', '--serial', serial, '--display', String(config.display ?? -1)];
     if (config.displayName) args.push('--display-name', config.displayName);
     for (const [key, flag] of Object.entries({ fps: 'fps', bitrate: 'bitrate', width: 'width', height: 'height',
-        bufferMode: 'buffer-mode', port: 'port' })) {
+        bufferMode: 'buffer-mode', port: 'port', profile: 'profile' })) {
         if (config[key] !== undefined && config[key] !== null) args.push('--' + flag, String(config[key]));
     }
     if (config.autoReconnect === false) args.push('--no-reconnect');
+    if (config.trace === true) args.push('--trace');
     activeStreamSerial = serial;
     activeStreamDeviceName = '';
+    activeHostConfig = { ...config, serial };
     latestStats = {};
     const options = hostOptions();
     const child = spawn(exe, args, { cwd: options.cwd, env: options.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -441,12 +655,35 @@ async function startHostProcess(config) {
     rl.on('line', line => {
         if (hostProcess !== child) return;
         let data;
-        try { data = JSON.parse(line); } catch { return; }
+        try {
+            data = JSON.parse(line);
+            if (data.type === 'client_info' || data.type === 'client_stats') {
+                data = { type: data.type, metrics: JSON.parse(data.payload) };
+                if (!data.metrics || typeof data.metrics !== 'object') return;
+            }
+        } catch { return; }
         if (data.type === 'state') {
             if (data.status === 'streaming') {
                 streamStatus = 'streaming';
+                data.trace = config.trace === true;
+                latestStats = {};
+                performanceReport = {
+                    schemaVersion: 2, version, transport: 'ADB forward / TCP',
+                    windows: { release: os.release(), version: os.version(), arch: os.arch() },
+                    startedAt: new Date().toISOString(), endedAt: null,
+                    stream: data, android: null, hostSamples: [], androidSamples: [],
+                    presentation: [], gpuSamples: [], trace: config.trace === true ? { host: [], client: [], clocks: [] } : null
+                };
+                if (performanceReport.trace) {
+                    void samplePresentation(serial, performanceReport);
+                    void sampleGpu(performanceReport);
+                }
                 currentConfig = { ...currentConfig, actualWidth: data.width, actualHeight: data.height };
             } else if (data.status !== 'mode_warning') {
+                if (data.status === 'disconnected' || data.status === 'stopped') {
+                    endReport();
+                    latestStats = {};
+                }
                 streamStatus = 'connecting';
             }
             updateTrayMenu();
@@ -456,10 +693,21 @@ async function startHostProcess(config) {
             updateTrayMenu();
         } else if (data.type === 'stats') {
             latestStats = data;
+            if (performanceReport && !performanceReport.endedAt) {
+                const first = performanceReport.hostSamples.length === 0;
+                addSample(performanceReport.hostSamples, data, MAX_HOST_SAMPLES);
+                if (first) sendToWindow('report-available');
+            }
             if (Date.now() - lastTrayUpdateTime > 1500) {
                 lastTrayUpdateTime = Date.now();
                 updateTrayMenu();
             }
+        } else if (['host_trace', 'client_trace', 'clock_sync'].includes(data.type)) {
+            if (performanceReport?.trace && !performanceReport.endedAt) collectTrace(performanceReport, data);
+            return;
+        } else if (performanceReport && !performanceReport.endedAt) {
+            if (data.type === 'client_info') performanceReport.android = data.metrics;
+            if (data.type === 'client_stats') addSample(performanceReport.androidSamples, data.metrics, MAX_CLIENT_SAMPLES);
         }
         sendToWindow('stream-event', data);
     });
@@ -471,6 +719,7 @@ async function startHostProcess(config) {
     });
     child.once('close', code => {
         if (hostProcess !== child) return;
+        endReport();
         hostProcess = null;
         activeStreamSerial = '';
         activeStreamDeviceName = '';
@@ -505,8 +754,8 @@ async function stopHostProcess() {
 }
 
 // Keep release preferences under a stable application profile.
-app.setName('ReDisplay');
-const profileDirectory = path.join(app.getPath('appData'), 'ReDisplay');
+app.setName('ReDisplay 1.2');
+const profileDirectory = path.join(app.getPath('appData'), 'ReDisplay-v1.2.0-demo');
 fs.mkdirSync(profileDirectory, { recursive: true });
 app.setPath('userData', profileDirectory);
 const gotTheLock = app.requestSingleInstanceLock();
@@ -524,6 +773,21 @@ if (!gotTheLock) {
     app.whenReady().then(() => {
         createWindow();
         createTray();
+
+        powerMonitor.on('suspend', () => {
+            suspendedStream = hostProcess && activeHostConfig?.autoReconnect !== false
+                ? { requestId, config: activeHostConfig } : null;
+        });
+        powerMonitor.on('resume', async () => {
+            const resume = suspendedStream;
+            suspendedStream = null;
+            if (!resume || resume.requestId !== requestId || quitRequested) return;
+            sendToWindow('stream-event', { type: 'state', status: 'connecting', phase: 'resuming', message: t('正在恢复休眠前的串流') });
+            const result = await startHostProcess(resume.config, true);
+            if (!result.success && !result.cancelled) {
+                sendToWindow('stream-status', { status: 'error', message: result.error });
+            }
+        });
 
         // Window controls
         ipcMain.on('window-minimize', () => mainWindow?.minimize());
@@ -554,6 +818,8 @@ if (!gotTheLock) {
 
         ipcMain.handle('get-displays', () => queryHost('--list-displays', 'displays'));
         ipcMain.handle('get-devices', () => queryHost('--list-devices', 'devices'));
+        ipcMain.handle('get-device-states', getDeviceStates);
+        ipcMain.handle('export-performance-report', exportPerformanceReport);
         ipcMain.handle('get-gpu-info', async () => {
             const displays = await queryHost('--list-displays', 'displays');
             const display = displays.find(d => !d.isVirtual && d.adapter?.includes('NVIDIA'));
@@ -567,8 +833,8 @@ if (!gotTheLock) {
         ipcMain.handle('test-usb-speed', (event, serial) => testUsbSpeed(serial));
 
         // Driver & Windows Settings
-        ipcMain.handle('check-driver-status', checkDriverStatus);
-        ipcMain.handle('manage-driver', (event, action) => manageDriver(action));
+        ipcMain.handle('get-driver-info', getDriverInfo);
+        ipcMain.handle('manage-driver', (event, action, serial) => manageDriver(action, serial));
         ipcMain.handle('open-display-settings', () => {
             exec('start ms-settings:display');
             return true;

@@ -16,9 +16,16 @@ struct DisplayInfo {
     bool isVirtual;
 };
 
+struct VddDriverInfo {
+    bool present = false;
+    bool started = false;
+    std::wstring version;
+};
+
 class DisplayManager {
 public:
     static std::vector<DisplayInfo> EnumerateDisplays();
     static DisplayInfo PickTargetDisplay(int preferredIndex = -1, int prefWidth = 2800, int prefHeight = 1752);
+    static VddDriverInfo GetVddDriverInfo();
     static bool IsVddDriverInstalled();
 };

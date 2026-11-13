@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <vdd_settings>
     <monitors>
         <count>1</count>
@@ -14,81 +14,16 @@
         <g_refresh_rate>180</g_refresh_rate>
     </global>
     <resolutions>
-        <!-- Samsung Tab S9+ Native Portrait (User's primary orientation) -->
-        <resolution>
-            <width>1752</width>
-            <height>2800</height>
-            <refresh_rate>144</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>1752</width>
-            <height>2800</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>1752</width>
-            <height>2800</height>
-            <refresh_rate>90</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>1752</width>
-            <height>2800</height>
-            <refresh_rate>60</refresh_rate>
-        </resolution>
-
-        <!-- Samsung Tab S9+ Native Landscape -->
-        <resolution>
-            <width>2800</width>
-            <height>1752</height>
-            <refresh_rate>144</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>2800</width>
-            <height>1752</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>2800</width>
-            <height>1752</height>
-            <refresh_rate>90</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>2800</width>
-            <height>1752</height>
-            <refresh_rate>60</refresh_rate>
-        </resolution>
-
-        <!-- Standard 16:10 resolutions (Portrait & Landscape) -->
-        <resolution>
-            <width>1600</width>
-            <height>2560</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>2560</width>
-            <height>1600</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>1200</width>
-            <height>1920</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>1920</width>
-            <height>1200</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>1080</width>
-            <height>1920</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
-        <resolution>
-            <width>1920</width>
-            <height>1080</height>
-            <refresh_rate>120</refresh_rate>
-        </resolution>
+        <!-- 16:9 -->
+        <resolution><width>1920</width><height>1080</height><refresh_rate>60</refresh_rate></resolution>
+        <resolution><width>1080</width><height>1920</height><refresh_rate>60</refresh_rate></resolution>
+        <resolution><width>2560</width><height>1440</height><refresh_rate>60</refresh_rate></resolution>
+        <resolution><width>1440</width><height>2560</height><refresh_rate>60</refresh_rate></resolution>
+        <!-- 16:10 -->
+        <resolution><width>1920</width><height>1200</height><refresh_rate>60</refresh_rate></resolution>
+        <resolution><width>1200</width><height>1920</height><refresh_rate>60</refresh_rate></resolution>
+        <resolution><width>2560</width><height>1600</height><refresh_rate>60</refresh_rate></resolution>
+        <resolution><width>1600</width><height>2560</height><refresh_rate>60</refresh_rate></resolution>
     </resolutions>
     <options>
         <CustomEdid>false</CustomEdid>

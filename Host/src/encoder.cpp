@@ -3,8 +3,8 @@
 
 typedef NVENCSTATUS(NVENCAPI* PNVENCODEAPICREATEINSTANCE)(NV_ENCODE_API_FUNCTION_LIST* functionList);
 
-NvEncoderD3D11::NvEncoderD3D11() 
-    : m_hNvEnc(NULL), m_hEncoder(NULL), m_pDevice(NULL), 
+NvEncoderD3D11::NvEncoderD3D11()
+    : m_hNvEnc(NULL), m_hEncoder(NULL), m_pDevice(NULL),
       m_width(0), m_height(0), m_fps(60), m_bitrateMbps(60),
       m_bitstreamBuffer(NULL), m_initialized(false) {
     ZeroMemory(&m_nvList, sizeof(m_nvList));
@@ -14,7 +14,7 @@ NvEncoderD3D11::~NvEncoderD3D11() {
     Destroy();
 }
 
-bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, int fps, int bitrateMbps) {
+bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, int fps, int bitrateMbps, std::string_view profile) {
     Destroy();
 
     m_pDevice = pDevice;
@@ -55,12 +55,14 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
         return false;
     }
 
-    // Get Low Latency Preset Config (NVENC 13.1 P1 + Ultra Low Latency)
+    m_officePreset = profile == "office";
+    const auto& preset = m_officePreset ? NV_ENC_PRESET_P2_GUID : NV_ENC_PRESET_P1_GUID;
     NV_ENC_PRESET_CONFIG presetConfig = { 0 };
     presetConfig.version = NV_ENC_PRESET_CONFIG_VER;
     presetConfig.presetCfg.version = NV_ENC_CONFIG_VER;
 
-    status = m_nvList.nvEncGetEncodePresetConfigEx(m_hEncoder, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P1_GUID, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &presetConfig);
+    status = m_nvList.nvEncGetEncodePresetConfigEx(m_hEncoder, NV_ENC_CODEC_H264_GUID, preset,
+                                                  NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &presetConfig);
     if (status != NV_ENC_SUCCESS) {
         std::cerr << "[NVENC] nvEncGetEncodePresetConfigEx error: " << status << std::endl;
         return false;
@@ -80,17 +82,18 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
     encConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
     encConfig.rcParams.multiPass = NV_ENC_MULTI_PASS_DISABLED;
     encConfig.rcParams.enableLookahead = 0;
+    m_vbvFrames = profile == "office" ? 3 : profile == "dynamic" ? 1 : 2;
     encConfig.rcParams.enableAQ = 0;
     encConfig.rcParams.enableTemporalAQ = 0;
     encConfig.rcParams.averageBitRate = (uint32_t)m_bitrateMbps * 1000 * 1000;
     encConfig.rcParams.maxBitRate = (uint32_t)m_bitrateMbps * 1000 * 1000;
-    encConfig.rcParams.vbvBufferSize = (uint32_t)m_bitrateMbps * 1000 * 1000 / m_fps * 2;
+    encConfig.rcParams.vbvBufferSize = (uint32_t)m_bitrateMbps * 1000 * 1000 / m_fps * m_vbvFrames;
     encConfig.rcParams.zeroReorderDelay = 1;
 
     NV_ENC_INITIALIZE_PARAMS initParams = { 0 };
     initParams.version = NV_ENC_INITIALIZE_PARAMS_VER;
     initParams.encodeGUID = NV_ENC_CODEC_H264_GUID;
-    initParams.presetGUID = NV_ENC_PRESET_P1_GUID;
+    initParams.presetGUID = preset;
     initParams.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
     initParams.encodeWidth = m_width;
     initParams.encodeHeight = m_height;
@@ -103,10 +106,10 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
     initParams.maxEncodeWidth = m_width;
     initParams.maxEncodeHeight = m_height;
 
-    std::cout << "[Stage 3 NVENC Param] frameRateNum=" << initParams.frameRateNum 
-              << ", frameRateDen=" << initParams.frameRateDen 
+    std::cout << "[Stage 3 NVENC Param] frameRateNum=" << initParams.frameRateNum
+              << ", frameRateDen=" << initParams.frameRateDen
               << ", gopLength=" << encConfig.gopLength
-              << ", resolution=" << initParams.encodeWidth << "x" << initParams.encodeHeight 
+              << ", resolution=" << initParams.encodeWidth << "x" << initParams.encodeHeight
               << ", bitrate=" << (encConfig.rcParams.averageBitRate / 1000000) << " Mbps" << std::endl;
 
     status = m_nvList.nvEncInitializeEncoder(m_hEncoder, &initParams);
@@ -129,8 +132,8 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
     m_bitstreamBuffer = createBuffer.bitstreamBuffer;
 
     m_initialized = true;
-    std::cout << "[NVENC] Ultra-low latency encoder initialized (" 
-              << m_width << "x" << m_height << " @" << m_fps << "Hz, " 
+    std::cout << "[NVENC] Ultra-low latency encoder initialized ("
+              << m_width << "x" << m_height << " @" << m_fps << "Hz, "
               << m_bitrateMbps << " Mbps CBR)" << std::endl;
     return true;
 }

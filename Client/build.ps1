@@ -35,8 +35,8 @@ Push-Location $work
 try {
     Invoke-Tool "$tools\aapt2.exe" @('compile', '--dir', "$source\res", '-o', 'res.zip')
     Invoke-Tool "$tools\aapt2.exe" @('link', '-I', $androidJar, '--manifest', "$source\AndroidManifest.xml",
-        '--rename-manifest-package', 'com.redisplay.client.demo', '--version-code', '1010000',
-        '--version-name', '1.1.0', '--java', 'generated', '--custom-package', 'com.redisplay.client', '-o', 'resources.apk', 'res.zip')
+        '--rename-manifest-package', 'com.redisplay.client.v120demo', '--version-code', '1020100',
+        '--version-name', '1.2.0', '--java', 'generated', '--custom-package', 'com.redisplay.client', '-o', 'resources.apk', 'res.zip')
     $sources = @(Get-ChildItem "$source\java" -Filter '*.java' -Recurse | Where-Object Name -ne 'R.java' | ForEach-Object FullName)
     $sources += (Join-Path $work 'generated\com\redisplay\client\R.java')
     if (!$Javac) { $Javac = "$Jdk\bin\javac.exe" }

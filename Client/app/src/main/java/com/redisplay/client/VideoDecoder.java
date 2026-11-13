@@ -2,6 +2,12 @@ package com.redisplay.client;
 
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.media.MediaCodecInfo;
+import android.util.Range;
+import android.util.LongSparseArray;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -30,17 +36,50 @@ public class VideoDecoder {
     private boolean released;
     private boolean needsIdr = true;
     private boolean flushAtIdr;
-    private long renderedFrames;
+    private long decodedFrames;
+    private long submittedFrames;
     private long droppedFrames;
+    private long abandonedFrames;
+    private int pendingFrames;
+    private int pendingPeak;
     private final long[] decodeTimesUs = new long[512];
     private final long[] surfaceGapsUs = new long[512];
     private int decodeSamples;
     private int surfaceSamples;
     private long lastSurfaceUs;
+    private float panelHz;
+    private volatile long expectedPresentationNs;
+    private long lastRequestedVsyncNs;
+    private final LongSparseArray<Long> traceIds = new LongSparseArray<>();
+    private final ArrayDeque<long[]> traceOutput = new ArrayDeque<>();
 
     public VideoDecoder() {
         callbackThread.start();
         callbackHandler = new Handler(callbackThread.getLooper());
+    }
+
+    public synchronized void setPanelRefreshRate(float hz) {
+        panelHz = hz;
+    }
+
+    public void setExpectedPresentationTime(long timestampNs) {
+        expectedPresentationNs = timestampNs;
+    }
+
+    private long renderTimestampNs(long now) {
+        if (fps != 120 || Math.abs(panelHz - fps) > 0.5f) return now;
+        final long anchor = expectedPresentationNs;
+        if (anchor <= 0 || Math.abs(anchor - now) > 100_000_000L) return 0;
+        final long period = Math.round(1_000_000_000.0 / panelHz);
+        final long earliest = now + 2_000_000L;
+        final long firstVsync = anchor + Math.floorDiv(earliest - anchor + period - 1, period) * period;
+        final long vsync = Math.max(firstVsync, lastRequestedVsyncNs + period);
+        if (vsync - now > 2 * period + 1_000_000L) {
+            lastRequestedVsyncNs = 0;
+            return 0;
+        }
+        lastRequestedVsyncNs = vsync;
+        return vsync - 750_000L;
     }
 
     public synchronized void setSurface(Surface newSurface) {
@@ -63,11 +102,16 @@ public class VideoDecoder {
         height = newHeight;
         fps = newFps;
         hasConfig = true;
-        renderedFrames = 0;
+        decodedFrames = 0;
+        submittedFrames = 0;
+        abandonedFrames = 0;
+        pendingPeak = 0;
         droppedFrames = 0;
         decodeSamples = 0;
         surfaceSamples = 0;
         lastSurfaceUs = 0;
+        traceOutput.clear();
+        panelHz = 0;
         openCodec();
     }
 
@@ -105,18 +149,33 @@ public class VideoDecoder {
                     synchronized (VideoDecoder.this) {
                         if (codec != source) return;
                         try {
-                            boolean render = info.size > 0 && surface != null && surface.isValid();
-                            if (render) {
-                                // Timestamp against Android VSYNC so a faster stream can present its newest frame.
-                                source.releaseOutputBuffer(index, System.nanoTime());
-                                long submittedUs = System.nanoTime() / 1000;
-                                long duration = submittedUs - info.presentationTimeUs;
+                            boolean picture = info.size > 0 && (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0;
+                            long outputUs = System.nanoTime() / 1000;
+                            long submittedUs = 0;
+                            if (picture) {
+                                decodedFrames++;
+                                if (pendingFrames > 0) pendingFrames--;
+                                long duration = outputUs - info.presentationTimeUs;
                                 if (duration >= 0) decodeTimesUs[decodeSamples++ % decodeTimesUs.length] = duration;
+                            }
+                            boolean render = picture && surface != null && surface.isValid();
+                            if (render) {
+                                source.releaseOutputBuffer(index, renderTimestampNs(System.nanoTime()));
+                                submittedUs = System.nanoTime() / 1000;
                                 if (lastSurfaceUs != 0) surfaceGapsUs[surfaceSamples++ % surfaceGapsUs.length] = submittedUs - lastSurfaceUs;
                                 lastSurfaceUs = submittedUs;
-                                renderedFrames++;
+                                submittedFrames++;
                             } else {
                                 source.releaseOutputBuffer(index, false);
+                            }
+                            if (picture && traceIds.size() > 0) {
+                                Long id = traceIds.get(info.presentationTimeUs);
+                                if (id != null) {
+                                    traceIds.delete(info.presentationTimeUs);
+                                    if (traceOutput.size() < 512) {
+                                        traceOutput.addLast(new long[]{id, info.presentationTimeUs, outputUs, submittedUs});
+                                    }
+                                }
                             }
                         } catch (RuntimeException e) {
                             Log.w(TAG, "Output buffer failed", e);
@@ -157,8 +216,11 @@ public class VideoDecoder {
     }
 
     // Returns false when the receiver needs a fresh IDR. The input wait bounds network-thread latency.
-    public synchronized boolean decode(byte[] data, int length, long timestampUs, boolean keyFrame) {
-        if (released || !hasConfig || surface == null || !surface.isValid()) return true;
+    public synchronized boolean decode(byte[] data, int length, long timestampUs, boolean keyFrame, long traceId) {
+        if (released || !hasConfig || surface == null || !surface.isValid()) {
+            droppedFrames++;
+            return true;
+        }
         if (codec == null && keyFrame) openCodec();
         if (codec == null || (needsIdr && !keyFrame)) {
             droppedFrames++;
@@ -170,7 +232,10 @@ public class VideoDecoder {
                 // A failed input handoff breaks the reference chain. Start with fresh SPS/PPS and IDR.
                 closeCodec();
                 openCodec();
-                if (codec == null) return false;
+                if (codec == null) {
+                    droppedFrames++;
+                    return false;
+                }
             }
             final MediaCodec target = codec;
             final long deadline = SystemClock.elapsedRealtime() + 12;
@@ -179,7 +244,10 @@ public class VideoDecoder {
                 if (remaining <= 0) break;
                 wait(remaining);
             }
-            if (codec != target) return false;
+            if (codec != target) {
+                droppedFrames++;
+                return false;
+            }
             Integer index = inputBuffers.pollFirst();
             if (index != null) {
                 ByteBuffer input = target.getInputBuffer(index);
@@ -187,6 +255,8 @@ public class VideoDecoder {
                     input.clear();
                     input.put(data, 0, length);
                     target.queueInputBuffer(index, 0, length, timestampUs, 0);
+                    if (traceId > 0 && traceIds.size() < 512) traceIds.put(timestampUs, traceId);
+                    pendingPeak = Math.max(pendingPeak, ++pendingFrames);
                     needsIdr = false;
                     return true;
                 }
@@ -207,26 +277,70 @@ public class VideoDecoder {
         return false;
     }
 
-    public synchronized double[] takeTimingP95Ms() {
-        double[] result = { percentileMs(decodeTimesUs, decodeSamples), percentileMs(surfaceGapsUs, surfaceSamples) };
+    static final class Stats {
+        final long decoded, submitted, inputDrops, abandoned;
+        final int pending, pendingPeak;
+        final long[] decodeUs, surfaceGapsUs;
+
+        Stats(long decoded, long submitted, long inputDrops, long abandoned, int pending,
+              int pendingPeak, long[] decodeUs, long[] surfaceGapsUs) {
+            this.decoded = decoded;
+            this.submitted = submitted;
+            this.inputDrops = inputDrops;
+            this.abandoned = abandoned;
+            this.pending = pending;
+            this.pendingPeak = pendingPeak;
+            this.decodeUs = decodeUs;
+            this.surfaceGapsUs = surfaceGapsUs;
+        }
+    }
+
+    synchronized Stats takeStats() {
+        Stats stats = new Stats(decodedFrames, submittedFrames, droppedFrames, abandonedFrames,
+                pendingFrames, pendingPeak, Arrays.copyOf(decodeTimesUs, Math.min(decodeSamples, decodeTimesUs.length)),
+                Arrays.copyOf(surfaceGapsUs, Math.min(surfaceSamples, surfaceGapsUs.length)));
         decodeSamples = 0;
         surfaceSamples = 0;
+        pendingPeak = pendingFrames;
+        return stats;
+    }
+
+    synchronized long[][] takeTrace() {
+        long[][] samples = traceOutput.toArray(new long[0][]);
+        traceOutput.clear();
+        return samples;
+    }
+
+    synchronized JSONObject describeCodec() throws JSONException {
+        JSONObject result = new JSONObject();
+        if (codec == null) return result;
+        result.put("decoder", codec.getName());
+        try {
+            MediaCodecInfo info = codec.getCodecInfo();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                result.put("hardwareAccelerated", info.isHardwareAccelerated());
+            }
+            MediaCodecInfo.VideoCapabilities video = info.getCapabilitiesForType(MIME_TYPE).getVideoCapabilities();
+            if (video != null && video.isSizeSupported(width, height)) {
+                result.put("advertisedMaxFps", video.getSupportedFrameRatesFor(width, height).getUpper());
+                result.put("requestedRateSupported", video.areSizeAndRateSupported(width, height, fps));
+                Range<Double> measured = video.getAchievableFrameRatesFor(width, height);
+                if (measured != null) result.put("estimatedMaxFps", measured.getUpper());
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Decoder capability query unavailable", e);
+        }
         return result;
     }
-
-    private static double percentileMs(long[] samples, int count) {
-        count = Math.min(count, samples.length);
-        if (count == 0) return 0;
-        Arrays.sort(samples, 0, count);
-        return samples[(count * 95 - 1) / 100] / 1000.0;
-    }
-
-    public synchronized long getRenderedFrames() { return renderedFrames; }
-    public synchronized long getDroppedFrames() { return droppedFrames; }
 
     private void closeCodec() {
         MediaCodec old = codec;
         codec = null;
+        abandonedFrames += pendingFrames;
+        pendingFrames = 0;
+        lastRequestedVsyncNs = 0;
+        lastSurfaceUs = 0;
+        traceIds.clear();
         inputBuffers.clear();
         needsIdr = true;
         flushAtIdr = false;

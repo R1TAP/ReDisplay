@@ -4,6 +4,8 @@
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <devguid.h>
+#include <initguid.h>
+#include <devpkey.h>
 
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
@@ -123,11 +125,10 @@ DisplayInfo DisplayManager::PickTargetDisplay(int preferredIndex, int prefWidth,
     return displays[0];
 }
 
-bool DisplayManager::IsVddDriverInstalled() {
+VddDriverInfo DisplayManager::GetVddDriverInfo() {
+    VddDriverInfo info;
     HDEVINFO devices = SetupDiGetClassDevsW(&GUID_DEVCLASS_DISPLAY, nullptr, nullptr, DIGCF_PRESENT);
-    if (devices == INVALID_HANDLE_VALUE) return false;
-
-    bool started = false;
+    if (devices == INVALID_HANDLE_VALUE) return info;
     SP_DEVINFO_DATA device{};
     device.cbSize = sizeof(device);
     for (DWORD i = 0; SetupDiEnumDeviceInfo(devices, i, &device); ++i) {
@@ -137,13 +138,26 @@ bool DisplayManager::IsVddDriverInstalled() {
         for (const wchar_t* id = ids; *id; id += wcslen(id) + 1) {
             if (_wcsicmp(id, L"Root\\MttVDD") == 0 || _wcsicmp(id, L"MttVDD") == 0) {
                 ULONG status = 0, problem = 0;
-                started = CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0) == CR_SUCCESS &&
-                          (status & DN_STARTED) && !(status & DN_HAS_PROBLEM);
+                info.present = true;
+                info.started = CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0) == CR_SUCCESS &&
+                               (status & DN_STARTED) && !(status & DN_HAS_PROBLEM);
+                wchar_t version[128]{};
+                DEVPROPTYPE type = 0;
+                if (SetupDiGetDevicePropertyW(devices, &device, &DEVPKEY_Device_DriverVersion, &type,
+                        reinterpret_cast<PBYTE>(version), sizeof(version), nullptr, 0) && type == DEVPROP_TYPE_STRING) {
+                    info.version = version;
+                } else {
+                    info.version.clear();
+                }
                 break;
             }
         }
-        if (started) break;
+        if (info.started) break;
     }
     SetupDiDestroyDeviceInfoList(devices);
-    return started;
+    return info;
+}
+
+bool DisplayManager::IsVddDriverInstalled() {
+    return GetVddDriverInfo().started;
 }

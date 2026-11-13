@@ -30,8 +30,7 @@ ReDisplay incorporates or interfaces with the following third-party components:
 - **Terms & Conditions**: https://developer.android.com/studio/terms
 - **Notice**:
   ADB (Android Debug Bridge) is a component of the Android SDK Platform-Tools.
-  ReDisplay forwards the video stream through an ADB tunnel, using the adb from the system PATH or an adb at a user-defined path.
-  The copyright of the redistributed adb binary belongs to Google LLC and is subject to the Android SDK Terms.
+  ReDisplay forwards the video stream through an ADB tunnel. The public release uses the platform-tools installation supplied by the user through ANDROID_HOME, ANDROID_SDK_ROOT, PATH, or REDISPLAY_ADB.
 
 ---
 
@@ -47,11 +46,25 @@ ReDisplay incorporates or interfaces with the following third-party components:
 
 - The bundled MttVDD DLL, INF, and catalog are from the MikeTheTech / VirtualDrivers Virtual Display Driver family. The local INF identifies version 11.30.4.434 and Root\MttVDD. The upstream project publishes its source and MIT license.
   - https://github.com/VirtualDrivers/Virtual-Display-Driver
-  - https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/master/LICENSE
+  - [License included with the project](Driver/LICENSE.MttVDD.txt) · https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/24.12.24/LICENSE
 - The bundled nefcon.exe is the Nefarius device management utility. Its upstream project publishes its source and MIT license.
   - https://github.com/nefarius/nefcon
-  - https://github.com/nefarius/nefcon/blob/master/LICENSE
+  - [License included with the project](Driver/LICENSE.NefCon.txt) · https://github.com/nefarius/nefcon/blob/v1.20.0/LICENSE
 
 ## 6. Electron / Chromium
 
 - The Windows package uses the Electron runtime pinned by GUI/package-lock.json. The bundled Electron LICENSE and LICENSES.chromium.html accompany the runtime. LICENSE.ReDisplay contains the application license.
+
+## 7. Maple Mono
+
+The English interface uses Maple Mono v7.8 Latin WOFF2 files from the Fontsource package @fontsource/maple-mono 5.3.0. The files use the SIL Open Font License 1.1. The license accompanies the fonts in GUI/assets/fonts.
+
+- https://github.com/subframe7536/maple-font
+- https://www.npmjs.com/package/@fontsource/maple-mono/v/5.3.0
+
+## 8. JetBrains Mono
+
+The Chinese interface uses JetBrains Mono for Latin characters and telemetry. The bundled Latin variable WOFF2 comes from @fontsource-variable/jetbrains-mono 5.3.0. The SIL Open Font License 1.1 accompanies it in GUI/assets/fonts/JetBrains-Mono-OFL.txt.
+
+- https://github.com/JetBrains/JetBrainsMono
+- https://www.npmjs.com/package/@fontsource-variable/jetbrains-mono/v/5.3.0

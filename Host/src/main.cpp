@@ -8,6 +8,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <set>
 #include <tuple>
@@ -37,10 +38,6 @@ static BOOL WINAPI ConsoleHandler(DWORD signal) {
     if (signal != CTRL_C_EVENT && signal != CTRL_CLOSE_EVENT) return FALSE;
     g_running = false;
     return TRUE;
-}
-
-static uint64_t GetTimestampUs() {
-    return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
 static std::string WStringToUtf8(const std::wstring& wstr) {
@@ -152,8 +149,10 @@ struct Settings {
     std::string displayName;
     std::string serial;
     std::string bufferMode = "lowlatency";
+    std::string profile = "balanced";
     bool gui = false;
     bool reconnect = true;
+    bool trace = false;
 };
 
 static bool ReadInteger(std::string_view value, int& result) {
@@ -175,11 +174,15 @@ static bool LoadSettings(int argc, char* argv[], Settings& config) {
         wchar_t serial[256]{};
         GetPrivateProfileStringW(L"Device", L"serial", L"auto", serial, _countof(serial), iniPath);
         config.serial = WStringToUtf8(serial);
+        wchar_t profile[32]{};
+        GetPrivateProfileStringW(L"Encoder", L"profile", L"balanced", profile, _countof(profile), iniPath);
+        config.profile = WStringToUtf8(profile);
     }
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--gui") continue;
+        if (arg == "--trace") { config.trace = true; continue; }
         if (arg == "--no-reconnect") { config.reconnect = false; continue; }
         if (i <= 3 && !arg.starts_with("--")) {
             int& field = (i == 1) ? config.display : (i == 2) ? config.fps : config.bitrate;
@@ -191,6 +194,7 @@ static bool LoadSettings(int argc, char* argv[], Settings& config) {
         if (arg == "--serial") config.serial = value;
         else if (arg == "--display-name") config.displayName = value;
         else if (arg == "--buffer-mode") config.bufferMode = value;
+        else if (arg == "--profile") config.profile = value;
         else {
             int* field = nullptr;
             if (arg == "--display") field = &config.display;
@@ -203,13 +207,36 @@ static bool LoadSettings(int argc, char* argv[], Settings& config) {
         }
     }
     if (config.serial == "auto") config.serial.clear();
-    return config.display >= -1 && config.width > 0 && config.width <= 8192 &&
+    return (!config.trace || config.gui) && config.display >= -1 && config.width > 0 && config.width <= 8192 &&
            config.height > 0 && config.height <= 8192 && config.fps >= 0 && config.fps <= 240 &&
            config.bitrate > 0 && config.bitrate <= 300 && config.port >= 0 && config.port <= 65535 &&
-           (config.bufferMode == "smooth" || config.bufferMode == "lowlatency");
+           (config.bufferMode == "smooth" || config.bufferMode == "lowlatency") &&
+           (config.profile == "balanced" || config.profile == "office" || config.profile == "dynamic");
 }
 
-static DisplayInfo ConfigureDisplay(const Settings& config) {
+struct DisplayModeRestore {
+    std::wstring device;
+    DEVMODEW original{};
+    DEVMODEW applied{};
+    bool gui = false;
+
+    ~DisplayModeRestore() {
+        if (device.empty()) return;
+        DEVMODEW current{};
+        current.dmSize = sizeof(current);
+        if (!EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &current) ||
+            current.dmPelsWidth != applied.dmPelsWidth || current.dmPelsHeight != applied.dmPelsHeight ||
+            current.dmDisplayFrequency != applied.dmDisplayFrequency ||
+            current.dmDisplayOrientation != original.dmDisplayOrientation) return;
+        original.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+        const auto result = ChangeDisplaySettingsExW(device.c_str(), &original, nullptr, 0, nullptr);
+        if (result != DISP_CHANGE_SUCCESSFUL) {
+            ReportState(gui, "mode_warning", "Could not restore the original virtual display mode");
+        }
+    }
+};
+
+static DisplayInfo ConfigureDisplay(const Settings& config, DisplayModeRestore& restore) {
     DisplayInfo display{};
     if (config.displayName.empty()) {
         display = DisplayManager::PickTargetDisplay(config.display, config.width, config.height);
@@ -241,16 +268,20 @@ static DisplayInfo ConfigureDisplay(const Settings& config) {
     DEVMODEW mode{};
     mode.dmSize = sizeof(mode);
     if (!EnumDisplaySettingsW(display.deviceName.c_str(), ENUM_CURRENT_SETTINGS, &mode)) return display;
+    restore.original = mode;
     mode.dmPelsWidth = config.width;
     mode.dmPelsHeight = config.height;
     mode.dmDisplayFrequency = modeFps;
     mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-    const LONG result = ChangeDisplaySettingsExW(display.deviceName.c_str(), &mode, nullptr, CDS_UPDATEREGISTRY, nullptr);
+    const LONG result = ChangeDisplaySettingsExW(display.deviceName.c_str(), &mode, nullptr, 0, nullptr);
     if (result != DISP_CHANGE_SUCCESSFUL) {
         ReportState(config.gui, "mode_warning", "Display mode change rejected (" + std::to_string(result) +
                     "). Streaming with current Windows mode.");
         return display;
     }
+    restore.device = display.deviceName;
+    restore.applied = mode;
+    restore.gui = config.gui;
     for (const auto& updated : DisplayManager::EnumerateDisplays()) {
         if (updated.deviceName == display.deviceName) return updated;
     }
@@ -310,13 +341,10 @@ static SOCKET ConnectToClient(int port) {
     return INVALID_SOCKET;
 }
 
-static uint64_t ToNetwork64(uint64_t value) {
-    return (static_cast<uint64_t>(htonl(static_cast<uint32_t>(value))) << 32) |
-           htonl(static_cast<uint32_t>(value >> 32));
-}
-
 class ClientControl {
 public:
+    explicit ClientControl(bool gui) : m_gui(gui) {}
+
     bool Poll(SOCKET socket) {
         fd_set readable;
         FD_ZERO(&readable);
@@ -325,52 +353,131 @@ public:
         const int readableCount = select(0, &readable, nullptr, nullptr, &timeout);
         if (readableCount <= 0) return readableCount == 0;
 
-        const int received = recv(socket, reinterpret_cast<char*>(&m_packet) + m_read,
-                                  sizeof(m_packet) - m_read, 0);
-        if (received <= 0) return false;
-        m_read += received;
+        if (m_payloadSize) {
+            if (!Read(socket, m_payload.data(), m_payloadSize)) return false;
+            if (m_read == m_payloadSize) {
+                if (m_gui) ReportPayload();
+                m_read = m_payloadSize = 0;
+            }
+            return true;
+        }
+
+        if (!Read(socket, reinterpret_cast<char*>(&m_packet), sizeof(m_packet))) return false;
         if (m_read < sizeof(m_packet)) return true;
         m_read = 0;
-        if (m_packet.magic != htonl(REDISPLAY_MAGIC) || m_packet.payload_size != 0) return false;
-        if (m_packet.packet_type == PACKET_TYPE_READY && !ready) {
-            ready = true;
-        } else if (m_packet.packet_type == PACKET_TYPE_REQUEST_IDR && ready) {
+        if (m_packet.magic != htonl(REDISPLAY_MAGIC)) return false;
+        const auto size = ntohl(m_packet.payload_size);
+        switch (m_packet.packet_type) {
+        case PACKET_TYPE_READY:
+            if (m_ready || size) return false;
+            m_ready = true;
+            return true;
+        case PACKET_TYPE_REQUEST_IDR:
+            if (!m_ready || size) return false;
             requestIdr = true;
-        } else {
+            return true;
+        case PACKET_TYPE_PONG:
+            if (!m_ready || (size && size != 16)) return false;
+            m_payloadSize = size;
+            return true;
+        case PACKET_TYPE_CLIENT_TRACE:
+            if (!m_ready || !size || size % 32 || size > m_payload.size()) return false;
+            m_payloadSize = size;
+            return true;
+        case PACKET_TYPE_CLIENT_INFO:
+        case PACKET_TYPE_CLIENT_STATS:
+            if (!m_ready || !size || size > m_payload.size()) return false;
+            m_payloadSize = size;
+            return true;
+        default:
             return false;
         }
-        return true;
     }
 
     bool WaitForReady(SOCKET socket) {
         const auto deadline = steady_clock::now() + 2500ms;
-        while (g_running && !ready && steady_clock::now() < deadline) {
+        while (g_running && !m_ready && steady_clock::now() < deadline) {
             if (!Poll(socket)) return false;
         }
-        return ready && g_running;
+        return m_ready && g_running;
     }
 
     std::atomic<bool> requestIdr{ false };
 
 private:
-    bool ready = false;
+    uint64_t ReadTime(unsigned offset) const {
+        uint64_t value;
+        std::memcpy(&value, m_payload.data() + offset, sizeof(value));
+        return Network64(value);
+    }
+
+    void ReportPayload() const {
+        if (m_packet.packet_type == PACKET_TYPE_PONG) {
+            const auto received = ClockUs(steady_clock::now());
+            std::cout << "{\"type\":\"clock_sync\",\"hostSendUs\":" << Network64(m_packet.timestamp_us)
+                      << ",\"clientReceiveUs\":" << ReadTime(0) << ",\"clientSendUs\":" << ReadTime(8)
+                      << ",\"hostReceiveUs\":" << received << '}' << std::endl;
+            return;
+        }
+        if (m_packet.packet_type == PACKET_TYPE_CLIENT_TRACE) {
+            std::cout << "{\"type\":\"client_trace\",\"frames\":[";
+            for (unsigned i = 0; i < m_payloadSize; i += 32) {
+                if (i) std::cout << ',';
+                std::cout << '[' << ReadTime(i) << ',' << ReadTime(i + 8) << ','
+                          << ReadTime(i + 16) << ',' << ReadTime(i + 24) << ']';
+            }
+            std::cout << "]}" << std::endl;
+            return;
+        }
+        std::cout << "{\"type\":\""
+                  << (m_packet.packet_type == PACKET_TYPE_CLIENT_INFO ? "client_info" : "client_stats")
+                  << "\",\"payload\":\"" << EscapeJson(std::string(m_payload.data(), m_payloadSize))
+                  << "\"}" << std::endl;
+    }
+
+    bool Read(SOCKET socket, char* buffer, unsigned size) {
+        const int received = recv(socket, buffer + m_read, size - m_read, 0);
+        if (received <= 0) return false;
+        m_read += received;
+        return true;
+    }
+
+    bool m_gui;
+    bool m_ready = false;
     PacketHeader m_packet{};
+    std::array<char, MAX_CONTROL_BYTES> m_payload{};
     unsigned m_read = 0;
+    unsigned m_payloadSize = 0;
 };
 
 struct EncodeStats {
     uint64_t frames = 0;
     uint64_t microseconds = 0;
+    uint64_t captureToEncodeUs = 0;
+    uint64_t bytes = 0;
+    size_t maxBytes = 0;
+    uint64_t failures = 0;
+    uint64_t gaps = 0;
     std::array<uint64_t, 256> durations{};
     std::array<uint64_t, 256> intervals{};
 };
 
-static double P95Ms(std::array<uint64_t, 256>& samples, uint64_t frames) {
-    const auto count = std::min<uint64_t>(frames, samples.size());
-    if (!count) return 0.0;
-    const auto index = (count * 95 - 1) / 100;
-    std::nth_element(samples.begin(), samples.begin() + index, samples.begin() + count);
-    return samples[index] / 1000.0;
+static double PercentileMs(const std::array<uint64_t, 256>& sorted, uint64_t count, unsigned percentile) {
+    count = std::min<uint64_t>(count, sorted.size());
+    return count ? sorted[(count * percentile - 1) / 100] / 1000.0 : 0.0;
+}
+
+static double AverageMs(uint64_t microseconds, uint64_t count) {
+    return count ? microseconds / (1000.0 * count) : 0.0;
+}
+
+static uint64_t ProcessCpuUs() {
+    FILETIME creation, exit, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user)) return 0;
+    const auto ticks = [](FILETIME time) {
+        return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    };
+    return (ticks(kernel) + ticks(user)) / 10;
 }
 
 static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& config) {
@@ -385,13 +492,14 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
         return;
     }
     if (!g_running) return;
-    ReportState(config.gui, "launching_app", "Launching ReDisplay Demo on " + android.model);
+    ReportState(config.gui, "launching_app", "Launching ReDisplay on " + android.model);
     if (!adb.LaunchClientApp(android.serial) || !g_running) {
-        ReportState(config.gui, "error", "ReDisplay Demo could not start on Android");
+        ReportState(config.gui, "error", "ReDisplay could not start on Android");
         return;
     }
 
-    const auto display = ConfigureDisplay(config);
+    DisplayModeRestore restore;
+    const auto display = ConfigureDisplay(config, restore);
     if (!display.hMonitor) {
         ReportState(config.gui, "error", "The selected display is unavailable");
         return;
@@ -407,23 +515,25 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
 
     StreamSocket sock{ ConnectToClient(forward.port) };
     if (sock.value == INVALID_SOCKET) {
-        ReportState(config.gui, "error", "Could not connect to the Android Demo");
+        ReportState(config.gui, "error", "Could not connect to the Android receiver");
         return;
     }
 
     NvEncoderD3D11 encoder;
-    AsyncNetworkSender sender(sock.value, config.bufferMode == "smooth" ? 12 : 2);
+    AsyncNetworkSender sender(sock.value, config.bufferMode == "smooth" ? 12 : 2, config.trace);
     std::mutex statsMutex;
     EncodeStats encodeStats;
     uint64_t previousEncodeStart = 0;
-    ClientControl control;
+    uint64_t previousFrameId = 0;
+    ClientControl control(config.gui);
     bool needIdr = true;
     unsigned consecutiveEncodeFailures = 0;
     std::atomic<bool> encodeHealthy{ true };
     ScreenCapture capture;
-    if (!capture.Initialize(device.get(), display.hMonitor, fps, [&](ID3D11Texture2D* texture, int, int) {
+    if (!capture.Initialize(device.get(), display.hMonitor, fps, [&](ID3D11Texture2D* texture, steady_clock::time_point capturedAt) {
         if (!sender.alive || !g_running || !encodeHealthy) return;
-        const uint64_t start = GetTimestampUs();
+        const auto start = steady_clock::now();
+        const auto startUs = ClockUs(start);
         EncodedPacket packet;
         packet.payload = sender.TakePayloadBuffer();
         bool keyframe = false;
@@ -431,24 +541,35 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
         if (!encoder.EncodeFrame(texture, needIdr, packet.payload, keyframe) ||
             packet.payload.empty() || packet.payload.size() > MAX_VIDEO_BYTES) {
             needIdr = true;
+            {
+                std::lock_guard lock(statsMutex);
+                ++encodeStats.failures;
+            }
             if (++consecutiveEncodeFailures >= 8) encodeHealthy = false;
             return;
         }
         consecutiveEncodeFailures = 0;
+        packet.encodedAt = steady_clock::now();
         {
             std::lock_guard lock(statsMutex);
-            const uint64_t duration = GetTimestampUs() - start;
+            const uint64_t duration = duration_cast<microseconds>(packet.encodedAt - start).count();
             const size_t index = encodeStats.frames++ % encodeStats.durations.size();
             encodeStats.durations[index] = duration;
-            encodeStats.intervals[index] = previousEncodeStart ? start - previousEncodeStart : 0;
-            previousEncodeStart = start;
+            if (previousEncodeStart) {
+                encodeStats.intervals[encodeStats.gaps++ % encodeStats.intervals.size()] = startUs - previousEncodeStart;
+            }
+            previousEncodeStart = startUs;
+            encodeStats.bytes += packet.payload.size();
+            encodeStats.maxBytes = std::max(encodeStats.maxBytes, packet.payload.size());
             encodeStats.microseconds += duration;
+            encodeStats.captureToEncodeUs += duration_cast<microseconds>(packet.encodedAt - capturedAt).count();
         }
         if (needIdr && !keyframe) return;
         packet.header.magic = htonl(REDISPLAY_MAGIC);
         packet.header.packet_type = PACKET_TYPE_VIDEO;
         packet.header.flags = keyframe ? FLAG_KEYFRAME : FLAG_NONE;
-        packet.header.timestamp_us = ToNetwork64(start);
+        previousFrameId = std::max(previousFrameId + 1, ClockUs(capturedAt));
+        packet.header.timestamp_us = Network64(previousFrameId);
         packet.header.payload_size = htonl(static_cast<uint32_t>(packet.payload.size()));
         needIdr = !sender.Push(std::move(packet));
     })) {
@@ -458,11 +579,11 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
 
     const int width = capture.GetWidth();
     const int height = capture.GetHeight();
-    if (!encoder.Initialize(device.get(), width, height, fps, config.bitrate)) {
+    if (!encoder.Initialize(device.get(), width, height, fps, config.bitrate, config.profile)) {
         ReportState(config.gui, "error", "NVENC encoder initialization failed");
         return;
     }
-    const PacketHeader header{ htonl(REDISPLAY_MAGIC), PACKET_TYPE_CONFIG, 0, 0, 0, htonl(sizeof(ConfigPayload)) };
+    const PacketHeader header{ htonl(REDISPLAY_MAGIC), PACKET_TYPE_CONFIG, 0, htons(config.trace ? CLIENT_TRACE_V1 : CLIENT_TELEMETRY_V1), 0, htonl(sizeof(ConfigPayload)) };
     const ConfigPayload payload{ htonl(width), htonl(height), htonl(fps) };
     if (!SendPacket(sock.value, header, &payload, sizeof(payload)) || !control.WaitForReady(sock.value)) {
         if (g_running) ReportState(config.gui, "error", "Android decoder did not become ready");
@@ -478,20 +599,26 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
         std::cout << "{\"type\":\"state\",\"status\":\"streaming\",\"display\":" << display.index
                   << ",\"width\":" << width << ",\"height\":" << height << ",\"fps\":" << fps
                   << ",\"displayHz\":" << display.fps << ",\"bitrate\":" << config.bitrate << ",\"device\":\"" << EscapeJson(android.model)
-                  << "\"}" << std::endl;
+                  << "\",\"encoderProfile\":\"" << config.profile << "\",\"codec\":\"H.264\",\"chroma\":\"4:2:0\""
+                  << ",\"rateControl\":\"CBR\",\"nvencPreset\":\"" << encoder.PresetName() << "\""
+                  << ",\"vbvFrames\":" << encoder.VbvFrames()
+                  << ",\"queueLimit\":" << (config.bufferMode == "smooth" ? 12 : 2)
+                  << '}' << std::endl;
     } else {
         std::cout << "[Streaming] " << width << 'x' << height << " @" << fps << " Hz" << std::endl;
     }
 
     auto lastTime = steady_clock::now();
     uint64_t lastSent = 0, lastBytes = 0, lastArrived = 0;
+    uint64_t lastCpu = ProcessCpuUs();
     while (g_running && sender.alive && capture.IsHealthy() && encodeHealthy && control.Poll(sock.value)) {
         const auto now = steady_clock::now();
         if (now - lastTime < 500ms) continue;
 
         const double elapsed = duration<double>(now - lastTime).count();
-        const auto sent = sender.frames.load();
-        const auto bytes = sender.bytes.load();
+        const auto network = sender.TakeStats();
+        const auto sent = network.frames;
+        const auto bytes = network.bytes;
         const auto arrived = capture.GetArrivedFrameCount();
         EncodeStats encoded;
         {
@@ -502,18 +629,48 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
         const double wgcFps = (arrived - lastArrived) / elapsed;
         const double encodeFps = encoded.frames / elapsed;
         const double mbps = (bytes - lastBytes) * 8.0 / (elapsed * 1000000.0);
-        const double encodeMs = encoded.frames ? encoded.microseconds / (1000.0 * encoded.frames) : 0.0;
-        const auto dropped = sender.dropped.load();
+        const double encodeMs = AverageMs(encoded.microseconds, encoded.frames);
+        const auto dropped = network.dropped;
+        const auto cpu = ProcessCpuUs();
+        const double cpuPercent = cpu >= lastCpu ? (cpu - lastCpu) / (elapsed * 10000.0) : 0.0;
+        lastCpu = cpu;
 
         if (config.gui) {
+            const auto count = std::min<uint64_t>(encoded.frames, encoded.durations.size());
+            std::sort(encoded.durations.begin(), encoded.durations.begin() + count);
+            const auto gaps = std::min<uint64_t>(encoded.gaps, encoded.intervals.size());
+            std::sort(encoded.intervals.begin(), encoded.intervals.begin() + gaps);
             std::cout << std::fixed << std::setprecision(1) << "{\"type\":\"stats\",\"fps\":" << sentFps
                       << ",\"wgcFps\":" << wgcFps << ",\"encodeFps\":" << encodeFps << ",\"mbps\":" << mbps
                       << std::setprecision(2) << ",\"encodeMs\":" << encodeMs
-                      << ",\"encodeP95Ms\":" << P95Ms(encoded.durations, encoded.frames)
-                      << ",\"encodeGapP95Ms\":" << P95Ms(encoded.intervals, encoded.frames)
+                      << ",\"encodeP50Ms\":" << PercentileMs(encoded.durations, count, 50)
+                      << ",\"encodeP95Ms\":" << PercentileMs(encoded.durations, count, 95)
+                      << ",\"encodeP99Ms\":" << PercentileMs(encoded.durations, count, 99)
+                      << ",\"encodeGapP95Ms\":" << PercentileMs(encoded.intervals, gaps, 95)
+                      << ",\"encodeFailures\":" << encoded.failures
+                      << ",\"encodeSamples\":" << encoded.frames
+                      << ",\"captureToEncodeAvgMs\":" << AverageMs(encoded.captureToEncodeUs, encoded.frames)
+                      << ",\"hostCpuPercent\":" << cpuPercent
+                      << ",\"encodeFrameAvgBytes\":" << (encoded.frames ? encoded.bytes / encoded.frames : 0)
+                      << ",\"encodeFrameMaxBytes\":" << encoded.maxBytes
+                      << ",\"wgcSuperseded\":" << capture.GetSupersededFrameCount()
+                      << ",\"windowMs\":" << elapsed * 1000.0
+                      << ",\"queueDepth\":" << network.queueDepth << ",\"queuePeak\":" << network.queuePeak
+                      << ",\"sendAvgMs\":" << AverageMs(network.sendUs, network.sendSamples)
+                      << ",\"sendMaxMs\":" << network.sendMaxUs / 1000.0
+                      << ",\"encodeToSendAvgMs\":" << AverageMs(network.encodeToSendUs, network.sendSamples)
                       << ",\"frames\":" << sent
                       << ",\"dropped\":" << dropped << ",\"bytes\":" << bytes
                       << ",\"device\":\"" << EscapeJson(android.model) << "\"}" << std::endl;
+            if (!network.trace.empty()) {
+                std::cout << "{\"type\":\"host_trace\",\"frames\":[";
+                const char* separator = "";
+                for (const auto& [id, encodedUs, sentUs] : network.trace) {
+                    std::cout << separator << '[' << id << ',' << encodedUs << ',' << sentUs << ']';
+                    separator = ",";
+                }
+                std::cout << "]}" << std::endl;
+            }
         } else {
             std::cout << std::fixed << std::setprecision(1) << "\rWGC " << wgcFps << " FPS | NVENC " << encodeFps
                       << " FPS (" << std::setprecision(2) << encodeMs << " ms) | TCP " << sentFps << " FPS ("
@@ -537,11 +694,18 @@ int main(int argc, char* argv[]) {
         const std::string_view arg = argv[i];
         if (arg == "--list-displays") { PrintDisplays(); return 0; }
         if (arg == "--list-devices") { PrintDevices(); return 0; }
+        if (arg == "--driver-info") {
+            const auto driver = DisplayManager::GetVddDriverInfo();
+            std::cout << "{\"present\":" << (driver.present ? "true" : "false")
+                      << ",\"started\":" << (driver.started ? "true" : "false")
+                      << ",\"version\":\"" << EscapeJson(WStringToUtf8(driver.version)) << "\"}\n";
+            return 0;
+        }
         if (arg == "--driver-status") {
             std::cout << (DisplayManager::IsVddDriverInstalled() ? "true" : "false") << std::endl;
             return 0;
         }
-        if (arg == "--version") { std::cout << "ReDisplay Host 1.1.0\n"; return 0; }
+        if (arg == "--version") { std::cout << "ReDisplay Host 1.2.0\n"; return 0; }
         if (arg == "--gui") config.gui = true;
     }
     if (!LoadSettings(argc, argv, config)) {
@@ -576,10 +740,10 @@ int main(int argc, char* argv[]) {
         const auto selected = config.serial.empty()
             ? std::find_if(devices.begin(), devices.end(), [](const auto& d) { return d.is_tablet; })
             : std::find_if(devices.begin(), devices.end(), [&](const auto& d) { return d.serial == config.serial; });
-        if (selected != devices.end()) {
-            Stream(adb, *selected, config);
-        } else if (config.serial.empty() && !devices.empty()) {
-            Stream(adb, devices.front(), config);
+        if (selected != devices.end() || (config.serial.empty() && !devices.empty())) {
+            const auto& device = selected != devices.end() ? *selected : devices.front();
+            config.serial = device.serial;
+            Stream(adb, device, config);
         } else {
             ReportState(config.gui, "waiting_device", config.serial.empty() ?
                         "Waiting for an authorized Android device" : "Waiting for the selected Android device");

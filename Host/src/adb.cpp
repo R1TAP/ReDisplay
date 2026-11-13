@@ -145,7 +145,7 @@ std::vector<AdbDevice> AdbManager::GetDevices() {
                     dev.product = token.substr(8);
                 }
             }
-            if (dev.model.find("X810") != std::string::npos || 
+            if (dev.model.find("X810") != std::string::npos ||
                 dev.product.find("gts9") != std::string::npos ||
                 dev.model.find("Tab") != std::string::npos) {
                 dev.is_tablet = true;
@@ -195,7 +195,7 @@ bool AdbManager::LaunchClientApp(const std::string& serial) {
     std::string output;
     ExecuteCommand(prefix + "input keyevent KEYCODE_WAKEUP", output);
     output.clear();
-    if (ExecuteCommand(prefix + "am start -W -n com.redisplay.client.demo/com.redisplay.client.MainActivity", output) &&
+    if (ExecuteCommand(prefix + "am start -W -n com.redisplay.client.v120demo/com.redisplay.client.MainActivity", output) &&
         output.find("Status: ok") != std::string::npos) return true;
     std::cerr << "[ADB] Android launch failed: " << output << '\n';
     return false;

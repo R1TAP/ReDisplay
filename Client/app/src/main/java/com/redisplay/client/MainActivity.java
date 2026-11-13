@@ -5,6 +5,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -12,6 +13,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
+import android.view.Choreographer;
 import android.view.Display;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
@@ -39,7 +41,37 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     private Intent serviceIntent;
     private boolean serviceBound;
     private boolean destroyed;
-    private int streamFps = 120;
+    private int streamFps;
+    private DisplayTiming displayTiming;
+
+    @android.annotation.TargetApi(Build.VERSION_CODES.TIRAMISU)
+    private static final class DisplayTiming implements Choreographer.VsyncCallback {
+        private final Choreographer choreographer = Choreographer.getInstance();
+        private final VideoDecoder decoder;
+        private boolean enabled;
+
+        DisplayTiming(VideoDecoder decoder) {
+            this.decoder = decoder;
+        }
+
+        void setEnabled(boolean next) {
+            if (enabled == next) return;
+            enabled = next;
+            if (enabled) {
+                choreographer.postVsyncCallback(this);
+            } else {
+                choreographer.removeVsyncCallback(this);
+                decoder.setExpectedPresentationTime(0);
+            }
+        }
+
+        @Override
+        public void onVsync(Choreographer.FrameData frame) {
+            if (!enabled) return;
+            decoder.setExpectedPresentationTime(frame.getPreferredFrameTimeline().getExpectedPresentationTimeNanos());
+            choreographer.postVsyncCallback(this);
+        }
+    }
 
     private final ServiceConnection serviceConn = new ServiceConnection() {
         @Override
@@ -74,6 +106,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         }
 
         decoder = new VideoDecoder();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) displayTiming = new DisplayTiming(decoder);
 
         // Build UI
         FrameLayout rootLayout = new FrameLayout(this);
@@ -130,7 +163,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         serviceIntent = new Intent(this, DisplayService.class);
         startForegroundService(serviceIntent);
         serviceBound = bindService(serviceIntent, serviceConn, Context.BIND_AUTO_CREATE);
-        server = new NetworkServer(decoder, this);
+        server = new NetworkServer(decoder, this,
+                (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE));
         server.start();
     }
 
@@ -143,7 +177,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     }
 
     private void applyStreamRefreshRate() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || streamFps <= 0) return;
         Display display = getDisplay();
         if (display == null) return;
 
@@ -201,13 +235,29 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             applyFullscreenImmersive();
+            if (displayTiming != null) displayTiming.setEnabled(streamFps == 120);
         }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        if (displayTiming != null) displayTiming.setEnabled(streamFps == 120);
         applyFullscreenImmersive();
+        applyStreamRefreshRate();
+    }
+
+    @Override
+    protected void onPause() {
+        if (displayTiming != null) displayTiming.setEnabled(false);
+        super.onPause();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        applyFullscreenImmersive();
+        applyStreamRefreshRate();
     }
 
     private void toggleStatsOverlay() {
@@ -264,6 +314,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         handler.post(() -> {
             if (destroyed) return;
             handler.removeCallbacks(hideOverlayRunnable);
+            streamFps = 0;
+            if (displayTiming != null) displayTiming.setEnabled(false);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowManager.LayoutParams params = getWindow().getAttributes();
+                params.preferredDisplayModeId = 0;
+                getWindow().setAttributes(params);
+                Surface surface = surfaceView.getHolder().getSurface();
+                if (surface.isValid()) {
+                    try {
+                        surface.setFrameRate(0, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+                    } catch (RuntimeException e) {
+                        Log.w(TAG, "Could not clear the display refresh hint", e);
+                    }
+                }
+            }
             statsOverlay.setText(getString(R.string.disconnected, NetworkServer.PORT));
             statsOverlay.setVisibility(View.VISIBLE);
             if (displayService != null) {
@@ -277,6 +342,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
         handler.post(() -> {
             if (destroyed) return;
             streamFps = fps;
+            if (displayTiming != null) displayTiming.setEnabled(fps == 120 && hasWindowFocus());
             applyStreamRefreshRate();
             surfaceView.setVideoSize(width, height);
             if (height > width) {
@@ -300,6 +366,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ne
     @Override
     protected void onDestroy() {
         destroyed = true;
+        if (displayTiming != null) displayTiming.setEnabled(false);
         handler.removeCallbacksAndMessages(null);
         if (server != null) server.stop();
         if (decoder != null) decoder.release();

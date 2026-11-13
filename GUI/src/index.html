@@ -4,9 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; script-src 'self'; style-src 'self'">
-    <title>ReDisplay</title>
+    <title>ReDisplay 1.2</title>
     <link rel="stylesheet" href="styles.css">
     <script src="../i18n.js" defer></script>
+    <script src="../profiles.js" defer></script>
     <script src="renderer.js" defer></script>
 </head>
 <body>
@@ -14,7 +15,7 @@
         <div class="brand">
             <img src="../assets/icon.png" width="22" height="22" alt="">
             <span>ReDisplay</span>
-            <span class="version-tag">v1.1.0</span>
+            <span class="version-tag">v1.2.0</span>
         </div>
         <div class="window-controls">
             <button id="btn-tray-min" class="icon-button" data-label="隐藏至托盘">
@@ -55,7 +56,7 @@
         </aside>
 
         <main>
-            <div class="workspace">
+            <div class="workspace-header">
                 <header class="overview">
                     <div>
                         <h1 id="page-title">连接</h1>
@@ -71,7 +72,14 @@
                         </button>
                     </div>
                 </header>
-
+                <div id="draft-banner" class="reconfig-banner" hidden>
+                    <p data-t="更改将在串流重新连接后生效。">更改将在串流重新连接后生效。</p>
+                    <div class="banner-actions">
+                        <button id="btn-discard-settings" class="text-button" data-t="取消修改">取消修改</button>
+                        <button id="btn-apply-settings" class="filled-button small" data-t="应用更改">应用更改</button>
+                    </div>
+                </div>
+                <p id="stream-feedback" class="stream-feedback" role="status" hidden></p>
                 <section id="reconfig-confirm-banner" class="reconfig-banner" aria-labelledby="reconfig-title" hidden>
                     <div>
                         <h2 id="reconfig-title" data-t="保留新设置？">保留新设置？</h2>
@@ -83,6 +91,10 @@
                     </div>
                 </section>
 
+            </div>
+
+            <div id="page-scroll" class="page-scroll" tabindex="0" data-label="页面内容">
+                <div class="workspace">
                 <section id="page-connect" class="page" aria-labelledby="page-title">
                     <div class="field-columns">
                         <div class="form-field">
@@ -90,7 +102,7 @@
                                 <label for="select-device" data-t="Android 设备">Android 设备</label>
                                 <button id="btn-refresh-devices" class="text-button" data-label="刷新 Android 设备" data-t="刷新">刷新</button>
                             </div>
-                            <select id="select-device"><option value="" data-t="正在查找设备…">正在查找设备…</option></select>
+                            <select data-stream-setting id="select-device"><button type="button"><selectedcontent></selectedcontent></button><option value="" data-t="正在查找设备…">正在查找设备…</option></select>
                             <p id="device-hint" class="field-hint"></p>
                         </div>
                         <div class="form-field">
@@ -98,7 +110,7 @@
                                 <label for="select-display" data-t="采集显示器">采集显示器</label>
                                 <button id="btn-refresh-displays" class="text-button" data-label="刷新显示器" data-t="刷新">刷新</button>
                             </div>
-                            <select id="select-display"><option value="" data-t="自动选择 · 优先虚拟显示器">自动选择 · 优先虚拟显示器</option></select>
+                            <select data-stream-setting id="select-display"><button type="button"><selectedcontent></selectedcontent></button><option value="" data-t="自动选择 · 优先虚拟显示器">自动选择 · 优先虚拟显示器</option></select>
                             <p id="val-display" class="field-hint"></p>
                         </div>
                     </div>
@@ -111,14 +123,15 @@
                         </div>
                         <div class="check-row">
                             <span data-t="虚拟显示驱动">虚拟显示驱动</span>
-                            <span class="check-result"><span id="dot-driver" class="health-dot" aria-hidden="true"></span><span id="val-driver" data-t="检查中…">检查中…</span></span>
+                            <span class="check-result"><span id="dot-driver" class="health-dot" aria-hidden="true"></span><span id="val-driver" role="status">检查中…</span></span>
                             <button id="btn-status-driver" class="text-button" hidden data-t="安装">安装</button>
                         </div>
                         <div class="check-row">
-                            <span data-t="USB 链路">USB 链路</span>
-                            <span id="stat-usb-desc" class="check-result" role="status"></span>
-                            <button id="btn-open-usb" class="text-button" disabled data-t="测速">测速</button>
+                            <span data-t="USB 测速">USB 测速</span>
+                            <span class="check-result"><span id="dot-usb" class="health-dot" aria-hidden="true"></span><span id="stat-usb-desc" role="status"></span></span>
+                            <button id="btn-open-usb" class="text-button" disabled></button>
                         </div>
+                        <p id="driver-feedback" class="field-hint" role="status" hidden></p>
                         <button id="btn-win-display" class="text-button section-link" data-t="Windows 显示设置">Windows 显示设置</button>
                     </section>
                 </section>
@@ -126,24 +139,22 @@
                 <section id="page-picture" class="page" aria-labelledby="page-title" hidden>
                     <div class="field-columns">
                         <div class="form-field">
-                            <label data-t="串流预设">串流预设</label>
+                            <div class="field-heading"><span class="field-label" data-t="串流预设">串流预设</span></div>
                             <div id="seg-profile" class="segmented" role="group" data-label="串流预设">
-                                <button data-profile="esports" aria-pressed="true" data-t="高帧率">高帧率</button>
-                                <button data-profile="quality" aria-pressed="false" data-t="高画质">高画质</button>
-                                <button data-profile="office" aria-pressed="false" data-t="低码率">低码率</button>
-                                <button data-profile="custom" aria-pressed="false" data-t="自定义">自定义</button>
+                                <button data-stream-setting data-profile="office" aria-pressed="false" data-t="办公">办公</button>
+                                <button data-stream-setting data-profile="balanced" aria-pressed="true" data-t="均衡">均衡</button>
+                                <button data-stream-setting data-profile="dynamic" aria-pressed="false" data-t="动态">动态</button>
                             </div>
+                            <p id="profile-hint" class="field-hint"></p>
                         </div>
                         <div class="form-field">
                             <div class="field-heading">
                                 <label for="select-resolution" data-t="副屏分辨率">副屏分辨率</label>
                                 <span id="val-resolution-ratio" class="field-hint"></span>
                             </div>
-                            <select id="select-resolution">
-                                <option value="1752x2800">1752 × 2800</option><option value="2800x1752">2800 × 1752</option>
-                                <option value="1600x2560">1600 × 2560</option><option value="2560x1600">2560 × 1600</option>
-                                <option value="1200x1920">1200 × 1920</option><option value="1920x1200">1920 × 1200</option>
-                                <option value="1080x1920">1080 × 1920</option><option value="1920x1080">1920 × 1080</option>
+                            <select data-stream-setting id="select-resolution">
+                                <button type="button"><selectedcontent></selectedcontent></button>
+                                <option value="1920x1080">1920 × 1080</option>
                             </select>
                         </div>
                     </div>
@@ -152,36 +163,40 @@
                             <label for="slider-fps" data-t="串流帧率">串流帧率</label>
                             <output id="val-fps" class="range-value" for="slider-fps">180 FPS</output>
                         </div>
-                        <input id="slider-fps" type="range" min="0" max="4" step="1" value="4" aria-describedby="fps-hint">
+                        <input data-stream-setting id="slider-fps" type="range" min="0" max="4" step="1" value="4" aria-describedby="fps-hint">
                         <div id="fps-ticks" class="range-scale" aria-hidden="true"></div>
                         <p id="fps-hint" class="field-hint"></p>
+                        <div class="field-heading" id="device-recommendation" hidden>
+                            <p id="device-recommendation-text" class="field-hint" role="status"></p>
+                            <button data-stream-setting id="btn-device-recommendation" class="text-button" data-t="应用建议">应用建议</button>
+                        </div>
+                        <p id="device-cap-warning" class="field-hint warning" hidden></p>
                     </div>
                     <div class="form-field page-section">
                         <div class="field-heading">
-                            <label for="slider-bitrate" data-t="编码码率">编码码率</label>
+                            <label for="slider-bitrate" data-t="目标码率">目标码率</label>
                             <output id="val-bitrate" class="range-value" for="slider-bitrate">60 Mbps</output>
                         </div>
-                        <input id="slider-bitrate" type="range" min="20" max="100" step="5" value="60" aria-valuetext="60 Mbps">
+                        <input data-stream-setting id="slider-bitrate" type="range" min="20" max="100" step="5" value="60" aria-valuetext="60 Mbps">
                         <div class="chip-row" role="group" data-label="快捷码率">
-                            <button class="chip" data-val="30" aria-pressed="false">30</button>
-                            <button class="chip" data-val="60" aria-pressed="true">60</button>
-                            <button class="chip" data-val="85" aria-pressed="false">85</button>
-                            <button class="chip" data-val="100" aria-pressed="false">100</button>
+                            <button data-stream-setting class="chip" data-val="30" aria-pressed="false">30</button>
+                            <button data-stream-setting class="chip" data-val="60" aria-pressed="true">60</button>
+                            <button data-stream-setting class="chip" data-val="85" aria-pressed="false">85</button>
+                            <button data-stream-setting class="chip" data-val="100" aria-pressed="false">100</button>
                         </div>
+                        <p class="field-hint" data-t="实际发送码率可在诊断页查看。">实际发送码率可在诊断页查看。</p>
                     </div>
+                    <p id="picture-active-mode" class="field-hint" hidden></p>
                 </section>
 
                 <section id="page-diagnostics" class="page" aria-labelledby="page-title" hidden>
-                    <section>
-                        <div class="field-heading">
-                            <h2 data-t="运行状态">运行状态</h2>
-                            <p id="stream-mode" class="field-hint"></p>
-                        </div>
-                        <div class="metrics">
+                    <section class="diagnostic-section" aria-labelledby="host-heading">
+                        <h2 id="host-heading" data-t="Windows 主机">Windows 主机</h2>
+                        <div class="metrics host-metrics">
                             <div class="metric">
-                                <div class="metric-label"><span data-t="发送帧率">发送帧率</span><span id="card-fps-target" class="metric-tag" hidden></span></div>
+                                <div class="metric-label" data-t="实际发送">实际发送</div>
                                 <div class="metric-value"><span id="stat-fps">—</span><small>FPS</small></div>
-                                <div id="stat-fps-desc" class="metric-note"></div>
+                                <div class="metric-note" id="stat-fps-desc"></div>
                             </div>
                             <div class="metric">
                                 <div class="metric-label" data-t="发送码率">发送码率</div>
@@ -189,43 +204,98 @@
                                 <div class="metric-note">ADB / TCP</div>
                             </div>
                             <div class="metric">
-                                <div class="metric-label" data-t="编码耗时">编码耗时</div>
+                                <div class="metric-label" data-t="平均编码耗时">平均编码耗时</div>
                                 <div class="metric-value"><span id="stat-latency">—</span><small>ms</small></div>
-                                <div id="stat-encode-tail" class="metric-note">P95 —</div>
+                                <div class="metric-note" id="stat-encode-tail"></div>
                             </div>
                             <div class="metric">
                                 <div class="metric-label" data-t="已发送帧数">已发送帧数</div>
-                                <div class="metric-value"><span id="stat-frames">—</span><small data-t="帧">帧</small></div>
-                                <div id="badge-drop-rate" class="metric-note"></div>
+                                <div class="metric-value"><span id="stat-frames">—</span></div>
+                                <div class="metric-note" id="badge-drop-rate"></div>
                             </div>
                         </div>
-                        <div class="cadence">
-                            <span><span data-t="编码帧间隔 P95">编码帧间隔 P95</span> <strong id="stat-frame-gap">—</strong></span>
-                            <span id="stat-gpu-desc">NVENC H.264</span>
-                        </div>
+                        <dl class="metadata">
+                            <div><dt data-t="目标串流帧率">目标串流帧率</dt><dd id="card-fps-target" class="data-value">—</dd></div>
+                            <div><dt data-t="Windows 显示模式">Windows 显示模式</dt><dd id="stream-mode" class="data-value">—</dd></div>
+                            <div><dt data-t="GPU">GPU</dt><dd id="stat-gpu-desc" class="truncate">—</dd></div>
+                            <div><dt data-t="编码间隔 P95">编码间隔 P95</dt><dd id="stat-frame-gap" class="data-value">—</dd></div>
+                            <div><dt data-t="Host CPU · 单核当量">Host CPU · 单核当量</dt><dd id="stat-host-cpu" class="data-value">—</dd></div>
+                            <div><dt data-t="当前发送队列">当前发送队列</dt><dd id="stat-send-queue" class="data-value">—</dd></div>
+                            <div><dt data-t="采样窗口队列峰值">采样窗口队列峰值</dt><dd id="stat-queue-peak" class="data-value">—</dd></div>
+                            <div><dt data-t="GPU / NVENC 利用率">GPU / NVENC 利用率</dt><dd id="stat-host-gpu" class="data-value">—</dd></div>
+                        </dl>
                     </section>
-                    <section class="page-section">
-                        <div class="field-heading">
-                            <div>
-                                <h2 data-t="USB 连接测速">USB 连接测速</h2>
-                                <p class="field-hint" data-t="通过 ADB 传输 10 MiB 数据测量实际吞吐。">通过 ADB 传输 10 MiB 数据测量实际吞吐。</p>
+                    <section class="diagnostic-section" aria-labelledby="receiver-heading">
+                        <h2 id="receiver-heading" data-t="Android 接收端">Android 接收端</h2>
+                        <div class="metrics client-metrics">
+                            <div class="metric">
+                                <div class="metric-label" data-t="接收帧率">接收帧率</div>
+                                <div class="metric-value"><span id="stat-client-rx">—</span><small>FPS</small></div>
+                                <div class="metric-note" id="stat-client-rx-note"></div>
                             </div>
-                            <button id="btn-test-usb" class="filled-button small" disabled></button>
-                        </div>
-                        <div class="usb-result" role="status">
-                            <div class="usb-speed"><strong id="usb-speed">—</strong><span>MB/s</span></div>
-                            <div class="usb-result-details">
-                                <span id="usb-estimate" class="metric-tag" hidden></span>
-                                <span id="usb-test-state"></span>
-                                <span id="usb-negotiated"></span>
+                            <div class="metric">
+                                <div class="metric-label" data-t="解码输出">解码输出</div>
+                                <div class="metric-value"><span id="stat-client-decode">—</span><small>FPS</small></div>
+                                <div class="metric-note" id="stat-client-decode-time"></div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-label" data-t="Surface 提交">Surface 提交</div>
+                                <div class="metric-value"><span id="stat-client-surface">—</span><small>FPS</small></div>
+                                <div class="metric-note" id="stat-client-surface-gap"></div>
                             </div>
                         </div>
+                        <dl class="metadata">
+                            <div><dt data-t="解码器">解码器</dt><dd id="stat-client-info" class="truncate">—</dd></div>
+                            <div><dt data-t="面板刷新率">面板刷新率</dt><dd id="stat-client-panel" class="data-value">—</dd></div>
+                            <div><dt data-t="会话解码输入丢帧">会话解码输入丢帧</dt><dd id="stat-client-drops" class="data-value">—</dd></div>
+                            <div><dt data-t="解码待输出">解码待输出</dt><dd id="stat-client-pending" class="data-value">—</dd></div>
+                        </dl>
                     </section>
-                    <details id="log-drawer" class="page-section">
-                        <summary id="btn-toggle-log" data-t="运行日志">运行日志</summary>
-                        <div class="log-actions"><button id="btn-clear-log" class="text-button" data-t="清空日志">清空日志</button></div>
-                        <div id="log-console" class="log-console" tabindex="0" data-label="串流运行日志"></div>
-                    </details>
+                    <div class="diagnostic-tools">
+                        <section class="diagnostic-section" aria-labelledby="presentation-heading">
+                            <div class="field-heading">
+                                <h2 id="presentation-heading" data-t="系统呈现">系统呈现</h2>
+                                <button id="btn-enable-trace" class="text-button" data-t="开启追踪">开启追踪</button>
+                            </div>
+                            <p id="presentation-status" class="field-hint"></p>
+                            <dl id="presentation-data" class="metadata" hidden>
+                                <div><dt data-t="图层呈现帧率">图层呈现帧率</dt><dd id="stat-layer-present" class="data-value">—</dd></div>
+                                <div><dt data-t="图层呈现间隔 P95">图层呈现间隔 P95</dt><dd id="stat-layer-gap" class="data-value">—</dd></div>
+                                <div><dt data-t="采集至 Surface P95">采集至 Surface P95</dt><dd id="stat-trace-latency" class="data-value">—</dd></div>
+                                <div><dt data-t="对时半 RTT P95">对时半 RTT P95</dt><dd id="stat-trace-clock" class="data-value">—</dd></div>
+                            </dl>
+                        </section>
+                        <section class="diagnostic-section" aria-labelledby="usb-heading">
+                            <div class="field-heading">
+                                <h2 id="usb-heading" data-t="USB 测速">USB 测速</h2>
+                                <button id="btn-test-usb" class="filled-button small" disabled></button>
+                            </div>
+                            <div class="usb-result">
+                                <div class="usb-speed">
+                                    <div class="metric-label" data-t="ADB 应用层吞吐">ADB 应用层吞吐</div>
+                                    <div class="metric-value"><strong id="usb-speed">—</strong><small>Mbps</small></div>
+                                </div>
+                                <dl class="metadata usb-metadata">
+                                <div><dt data-t="协商速率">协商速率</dt><dd id="usb-negotiated">—</dd></div>
+                                <div><dt data-t="最近测试">最近测试</dt><dd id="usb-test-time" class="data-value">—</dd></div>
+                                <div><dt data-t="当前串流码率">当前串流码率</dt><dd id="usb-stream-rate" class="data-value">—</dd></div>
+                                </dl>
+                            </div>
+                            <p id="usb-test-state" class="field-hint" role="status"></p>
+                        </section>
+                    </div>
+                    <section class="diagnostic-section" aria-labelledby="diagnostic-files-heading">
+                        <div class="field-heading diagnostic-files-heading">
+                            <h2 id="diagnostic-files-heading" data-t="报告与日志">报告与日志</h2>
+                            <button id="btn-export-report" class="outlined-button" disabled data-t="导出性能报告">导出性能报告</button>
+                        </div>
+                        <p id="report-status" class="field-hint" role="status"></p>
+                        <details id="log-drawer">
+                            <summary id="btn-toggle-log" data-t="运行日志">运行日志</summary>
+                            <div class="log-actions"><button id="btn-clear-log" class="text-button" data-t="清空日志">清空日志</button></div>
+                            <div id="log-console" class="log-console" tabindex="0" data-label="串流运行日志"></div>
+                        </details>
+                    </section>
                 </section>
 
                 <section id="page-settings" class="page" aria-labelledby="page-title" hidden>
@@ -233,6 +303,7 @@
                         <div class="form-field">
                             <label for="select-theme" data-t="外观">外观</label>
                             <select id="select-theme">
+                                <button type="button"><selectedcontent></selectedcontent></button>
                                 <option value="system" data-t="跟随系统">跟随系统</option>
                                 <option value="light" data-t="浅色模式">浅色模式</option>
                                 <option value="dark" data-t="深色模式">深色模式</option>
@@ -240,7 +311,7 @@
                         </div>
                         <div class="form-field">
                             <label for="select-language" data-t="界面语言">界面语言</label>
-                            <select id="select-language"><option value="zh-CN">简体中文</option><option value="en">English</option></select>
+                            <select id="select-language"><button type="button"><selectedcontent></selectedcontent></button><option value="zh-CN">简体中文</option><option value="en">English</option></select>
                         </div>
                     </div>
                     <div class="form-field">
@@ -259,16 +330,22 @@
                         <div class="form-field advanced-field">
                             <span class="field-label" id="buffer-label" data-t="发送队列">发送队列</span>
                             <div id="seg-buffermode" class="segmented" role="group" aria-labelledby="buffer-label">
-                                <button data-mode="lowlatency" aria-pressed="true" data-t="低延迟 · 2 帧">低延迟 · 2 帧</button>
-                                <button data-mode="smooth" aria-pressed="false" data-t="平滑优先 · 12 帧">平滑优先 · 12 帧</button>
+                                <button data-stream-setting data-mode="lowlatency" aria-pressed="true" data-t="低延迟 · 2 帧">低延迟 · 2 帧</button>
+                                <button data-stream-setting data-mode="smooth" aria-pressed="false" data-t="平滑优先 · 12 帧">平滑优先 · 12 帧</button>
                             </div>
+                            <p class="field-hint" data-t="推荐低延迟。较大的队列提供更多缓冲，积压时会增加延迟。">推荐低延迟。较大的队列提供更多缓冲，积压时会增加延迟。</p>
                         </div>
                         <label class="switch-row" for="switch-autoreconnect">
                             <span><span data-t="自动重连">自动重连</span><small data-t="中断后等待同一设备恢复连接">中断后等待同一设备恢复连接</small></span>
-                            <input id="switch-autoreconnect" type="checkbox" role="switch" checked>
+                            <input data-stream-setting id="switch-autoreconnect" type="checkbox" role="switch" checked>
+                        </label>
+                        <label class="switch-row" for="switch-trace">
+                            <span><span data-t="图层呈现与链路追踪">图层呈现与链路追踪</span><small data-t="采样图层呈现与逐帧延迟。默认关闭，开启会增加采样开销。">采样图层呈现与逐帧延迟。默认关闭，开启会增加采样开销。</small></span>
+                            <input data-stream-setting id="switch-trace" type="checkbox" role="switch">
                         </label>
                     </section>
                 </section>
+                </div>
             </div>
         </main>
     </div>

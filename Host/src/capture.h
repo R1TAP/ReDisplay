@@ -3,10 +3,11 @@
 #include <d3d11.h>
 #include <memory>
 #include <functional>
+#include <chrono>
 
 class ScreenCapture {
 public:
-    using FrameCallback = std::function<void(ID3D11Texture2D* pTexture, int width, int height)>;
+    using FrameCallback = std::function<void(ID3D11Texture2D*, std::chrono::steady_clock::time_point)>;
 
     ScreenCapture();
     ~ScreenCapture();
@@ -18,6 +19,7 @@ public:
     int GetWidth() const { return m_width; }
     int GetHeight() const { return m_height; }
     uint64_t GetArrivedFrameCount() const;
+    uint64_t GetSupersededFrameCount() const;
     bool IsHealthy() const;
 
 private:

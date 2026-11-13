@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('api', {
 
     // Detection & Hardware
     getDevices: () => ipcRenderer.invoke('get-devices'),
+    getDeviceStates: () => ipcRenderer.invoke('get-device-states'),
+    exportPerformanceReport: () => ipcRenderer.invoke('export-performance-report'),
+    onReportAvailable: callback => ipcRenderer.on('report-available', () => callback()),
     getDisplays: () => ipcRenderer.invoke('get-displays'),
     getGpuInfo: () => ipcRenderer.invoke('get-gpu-info'),
     detectDeviceSpecs: (serial) => ipcRenderer.invoke('detect-device-specs', serial),
@@ -26,8 +29,8 @@ contextBridge.exposeInMainWorld('api', {
     installClientApk: (serial) => ipcRenderer.invoke('install-client-apk', serial),
 
     // Driver & Windows Settings
-    checkDriverStatus: () => ipcRenderer.invoke('check-driver-status'),
-    manageDriver: (action) => ipcRenderer.invoke('manage-driver', action),
+    getDriverInfo: () => ipcRenderer.invoke('get-driver-info'),
+    manageDriver: (action, serial) => ipcRenderer.invoke('manage-driver', action, serial),
     openDisplaySettings: () => ipcRenderer.invoke('open-display-settings'),
 
     // Event listeners

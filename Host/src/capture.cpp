@@ -27,6 +27,7 @@ struct ScreenCapture::Impl {
     GraphicsCaptureItem::Closed_revoker closed;
 
     Direct3D11CaptureFrame pendingFrame{ nullptr };
+    steady_clock::time_point pendingCaptureAt;
     std::mutex frameMutex;
     winrt::handle frameEvent;
     winrt::handle stopEvent;
@@ -34,6 +35,7 @@ struct ScreenCapture::Impl {
     std::thread worker;
     FrameCallback onFrame;
     std::atomic<uint64_t> arrivedCount{ 0 };
+    std::atomic<uint64_t> supersededCount{ 0 };
     std::atomic<bool> running{ false };
     std::atomic<bool> healthy{ true };
     winrt::Windows::Graphics::SizeInt32 size{};
@@ -44,6 +46,7 @@ ScreenCapture::ScreenCapture() : m_impl(std::make_shared<Impl>()), m_width(0), m
 ScreenCapture::~ScreenCapture() { Stop(); }
 
 uint64_t ScreenCapture::GetArrivedFrameCount() const { return m_impl->arrivedCount; }
+uint64_t ScreenCapture::GetSupersededFrameCount() const { return m_impl->supersededCount; }
 bool ScreenCapture::IsHealthy() const { return m_impl->healthy; }
 
 bool ScreenCapture::Initialize(ID3D11Device* device, HMONITOR monitor, int targetFps, FrameCallback onFrame) {
@@ -80,15 +83,21 @@ bool ScreenCapture::Initialize(ID3D11Device* device, HMONITOR monitor, int targe
             if (!state || !state->running) return;
             try {
                 Direct3D11CaptureFrame latest{ nullptr };
+                uint64_t arrived = 0;
                 while (auto frame = sender.TryGetNextFrame()) {
-                    ++state->arrivedCount;
+                    ++arrived;
                     latest = std::move(frame);
                 }
                 if (!latest) return;
+                const auto capturedAt = steady_clock::now();
 
                 std::lock_guard lock(state->frameMutex);
                 if (!state->running) return;
+                state->arrivedCount += arrived;
+                const auto superseded = arrived - 1 + (state->pendingFrame ? 1 : 0);
+                if (superseded) state->supersededCount.fetch_add(superseded, std::memory_order_relaxed);
                 state->pendingFrame = std::move(latest);
+                state->pendingCaptureAt = capturedAt;
                 SetEvent(state->frameEvent.get());
             } catch (const winrt::hresult_error&) {
                 state->healthy = false;
@@ -149,9 +158,11 @@ bool ScreenCapture::Start() {
                     }
 
                     Direct3D11CaptureFrame frame{ nullptr };
+                    steady_clock::time_point capturedAt;
                     {
                         std::lock_guard lock(state.frameMutex);
                         frame = std::move(state.pendingFrame);
+                        capturedAt = state.pendingCaptureAt;
                         ResetEvent(state.frameEvent.get());
                     }
                     if (!frame) continue;
@@ -168,7 +179,7 @@ bool ScreenCapture::Start() {
                     auto access = frame.Surface().as<Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
                     winrt::com_ptr<ID3D11Texture2D> texture;
                     winrt::check_hresult(access->GetInterface(IID_PPV_ARGS(texture.put())));
-                    state.onFrame(texture.get(), size.Width, size.Height);
+                    state.onFrame(texture.get(), capturedAt);
                 }
                 winrt::uninit_apartment();
             } catch (const std::exception& error) {
