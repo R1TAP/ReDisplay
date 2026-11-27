@@ -6,7 +6,9 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "protocol.h"
@@ -92,6 +94,13 @@ public:
         return true;
     }
 
+    void SetInputMode(bool enabled, uint64_t generation) {
+        std::lock_guard lock(m_mutex);
+        m_inputMode = PacketHeader{htonl(REDISPLAY_MAGIC), PACKET_TYPE_INPUT_MODE, static_cast<uint8_t>(enabled),
+                                   0, Network64(generation), 0};
+        m_ready.notify_one();
+    }
+
     void Stop() {
         {
             std::lock_guard lock(m_mutex);
@@ -108,10 +117,11 @@ public:
         std::lock_guard lock(m_mutex);
         m_stats.dropped = m_dropped;
         m_stats.queueDepth = m_queue.size();
-        auto snapshot = m_stats;
-        m_stats.trace.clear();
-        m_stats.sendSamples = m_stats.sendUs = m_stats.sendMaxUs = m_stats.encodeToSendUs = 0;
-        m_stats.queuePeak = m_stats.queueDepth;
+        auto snapshot = std::move(m_stats);
+        m_stats = {};
+        m_stats.frames = snapshot.frames;
+        m_stats.bytes = snapshot.bytes;
+        m_stats.queuePeak = snapshot.queueDepth;
         return snapshot;
     }
 
@@ -124,24 +134,24 @@ private:
         auto nextPing = steady_clock::now();
         for (;;) {
             EncodedPacket packet;
-            bool ping = false;
+            std::optional<PacketHeader> control;
             {
                 std::unique_lock lock(m_mutex);
-                auto ready = [this] { return m_stopping || !m_queue.empty(); };
-                if (m_trace) m_ready.wait_until(lock, nextPing, ready);
-                else m_ready.wait(lock, ready);
+                auto ready = [this] { return m_stopping || m_inputMode || !m_queue.empty(); };
+                m_ready.wait_until(lock, nextPing, ready);
                 if (m_stopping) break;
-                ping = m_trace && steady_clock::now() >= nextPing;
-                if (!ping) {
+                if (m_inputMode) {
+                    control = std::exchange(m_inputMode, std::nullopt);
+                } else if (const auto now = steady_clock::now(); now >= nextPing) {
+                    nextPing = now + seconds(1);
+                    control = PacketHeader{htonl(REDISPLAY_MAGIC), PACKET_TYPE_PING, 0, 0, Network64(ClockUs(now)), 0};
+                } else {
                     packet = std::move(m_queue.front());
                     m_queue.pop_front();
                 }
             }
-            if (ping) {
-                const auto now = steady_clock::now();
-                nextPing = now + seconds(1);
-                const PacketHeader header{htonl(REDISPLAY_MAGIC), PACKET_TYPE_PING, 0, 0, Network64(ClockUs(now)), 0};
-                if (SendPacket(m_socket, header, nullptr, 0)) continue;
+            if (control) {
+                if (SendPacket(m_socket, *control, nullptr, 0)) continue;
                 alive = false;
                 break;
             }
@@ -173,6 +183,7 @@ private:
     std::mutex m_mutex;
     std::condition_variable m_ready;
     std::deque<EncodedPacket> m_queue;
+    std::optional<PacketHeader> m_inputMode;
     std::vector<uint8_t> m_recycledPayload;
     NetworkStats m_stats;
     uint64_t m_dropped = 0;

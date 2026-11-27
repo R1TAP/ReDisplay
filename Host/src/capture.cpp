@@ -94,11 +94,13 @@ bool ScreenCapture::Initialize(ID3D11Device* device, HMONITOR monitor, int targe
                 std::lock_guard lock(state->frameMutex);
                 if (!state->running) return;
                 state->arrivedCount += arrived;
-                const auto superseded = arrived - 1 + (state->pendingFrame ? 1 : 0);
+                const bool wakeWorker = !state->pendingFrame;
+                const auto superseded = arrived - 1 + (wakeWorker ? 0 : 1);
                 if (superseded) state->supersededCount.fetch_add(superseded, std::memory_order_relaxed);
-                state->pendingFrame = std::move(latest);
+                // Release the superseded WGC frame after dropping the queue lock.
+                std::swap(state->pendingFrame, latest);
                 state->pendingCaptureAt = capturedAt;
-                SetEvent(state->frameEvent.get());
+                if (wakeWorker) SetEvent(state->frameEvent.get());
             } catch (const winrt::hresult_error&) {
                 state->healthy = false;
             }
@@ -163,7 +165,6 @@ bool ScreenCapture::Start() {
                         std::lock_guard lock(state.frameMutex);
                         frame = std::move(state.pendingFrame);
                         capturedAt = state.pendingCaptureAt;
-                        ResetEvent(state.frameEvent.get());
                     }
                     if (!frame) continue;
                     auto size = frame.ContentSize();

@@ -46,6 +46,28 @@ let lastTrayUpdateTime = 0;
 let performanceReport = null;
 let lastReport = null;
 let activeHostConfig;
+const pendingSettings = new Map();
+
+function setLiveSetting(name, value) {
+    const child = hostProcess;
+    const session = performanceReport?.stream?.session;
+    if (!child || streamStatus !== 'streaming' || !session || pendingSettings.has(name)) return false;
+    return new Promise(resolve => {
+        const finish = success => {
+            if (pendingSettings.get(name)?.finish !== finish) return;
+            clearTimeout(timer);
+            pendingSettings.delete(name);
+            resolve(success);
+        };
+        const timer = setTimeout(() => finish(false), 4000);
+        pendingSettings.set(name, { session, value, finish });
+        child.stdin.write(name + ' ' + session + ' ' + Number(value) + '\n', error => { if (error) finish(false); });
+    });
+}
+
+function finishPendingSettings() {
+    for (const request of pendingSettings.values()) request.finish(false);
+}
 let suspendedStream;
 
 // Dynamic Path Resolution
@@ -53,7 +75,7 @@ function getHostExePath() {
     const candidates = [
         path.join(__dirname, '..', 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, 'resources', 'bin', 'ReDisplayHost.exe'),
-        path.join(__dirname, '..', 'scratch', 'release-v120', 'bin', 'ReDisplayHost.exe'),
+        path.join(__dirname, '..', 'scratch', 'release-v131', 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, 'bin', 'ReDisplayHost.exe'),
         path.join(__dirname, 'ReDisplayHost.exe')
     ];
@@ -106,7 +128,7 @@ async function changeAdb(useDownload) {
 
 function getApkPath() {
     const candidates = [
-        path.join(__dirname, '..', 'scratch', 'release-v120', 'Client', 'ReDisplay.apk'),
+        path.join(__dirname, '..', 'scratch', 'release-v131', 'Client', 'ReDisplay.apk'),
         ...(path.basename(path.dirname(__dirname)) === 'resources' ? [path.join(__dirname, '..', 'Client', 'ReDisplay.apk')] : []),
         path.join(__dirname, 'resources', 'Client', 'ReDisplay.apk'),
         path.join(__dirname, 'Client', 'ReDisplay.apk')
@@ -137,9 +159,9 @@ function createWindow() {
         : path.join(__dirname, 'assets', 'icon.png');
 
     mainWindow = new BrowserWindow({
-        title: 'ReDisplay 1.2',
-        width: 840,
-        height: 590,
+        title: 'ReDisplay 1.3',
+        width: 880,
+        height: 630,
         minWidth: 660,
         minHeight: 480,
         frame: false,
@@ -152,6 +174,8 @@ function createWindow() {
         }
     });
 
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    mainWindow.webContents.on('will-navigate', event => event.preventDefault());
     mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 
     mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
@@ -367,7 +391,7 @@ async function detectDeviceSpecs(serial) {
         else if (/^high-speed\s*$/m.test(stdout)) usbTier = 'USB High-Speed (480 Mbps)';
         else if (/^full-speed\s*$/m.test(stdout)) usbTier = 'USB Full-Speed (12 Mbps)';
         return { width: Number(size?.[1] || 0), height: Number(size?.[2] || 0),
-            fps: Math.round(Math.max(0, ...modeRates)), usbTier };
+            fps: Math.round(Math.max(0, ...modeRates)), panelRates: [...new Set(modeRates.map(Math.round))], usbTier };
     } catch {
         return unknown;
     }
@@ -602,6 +626,7 @@ async function exportPerformanceReport() {
 function releaseHost() {
     const child = hostProcess;
     if (!child) return hostShutdown;
+    finishPendingSettings();
     endReport();
     hostProcess = null;
     hostShutdown = new Promise(resolve => {
@@ -668,6 +693,7 @@ async function startHostProcess(config, resume = false) {
     }
     if (config.autoReconnect === false) args.push('--no-reconnect');
     if (config.trace === true) args.push('--trace');
+    if (config.input === true) args.push('--input');
     activeStreamSerial = serial;
     activeStreamDeviceName = '';
     activeHostConfig = { ...config, serial };
@@ -687,13 +713,24 @@ async function startHostProcess(config, resume = false) {
                 if (!data.metrics || typeof data.metrics !== 'object') return;
             }
         } catch { return; }
-        if (data.type === 'state') {
+        if (data.type === 'bitrate_result' || data.type === 'input_result') {
+            if (performanceReport?.stream?.session !== data.session || performanceReport.endedAt) return;
+            const name = data.type === 'bitrate_result' ? 'bitrate' : 'input';
+            if (data.success) {
+                activeHostConfig[name] = currentConfig[name] = data[name];
+                if (name === 'bitrate')
+                    addSample(performanceReport.bitrateChanges, { at: new Date().toISOString(), mbps: data.bitrate }, 900);
+            }
+            const request = pendingSettings.get(name);
+            if (request?.session === data.session && request.value === data[name]) request.finish(data.success === true);
+        } else if (data.type === 'state') {
             if (data.status === 'streaming') {
                 streamStatus = 'streaming';
                 data.trace = config.trace === true;
+                activeHostConfig.input = currentConfig.input = data.input;
                 latestStats = {};
                 performanceReport = {
-                    schemaVersion: 2, version, transport: 'ADB forward / TCP',
+                    schemaVersion: 3, bitrateChanges: [], version, transport: 'ADB forward / localabstract',
                     windows: { release: os.release(), version: os.version(), arch: os.arch() },
                     startedAt: new Date().toISOString(), endedAt: null,
                     stream: data, android: null, hostSamples: [], androidSamples: [],
@@ -706,6 +743,7 @@ async function startHostProcess(config, resume = false) {
                 currentConfig = { ...currentConfig, actualWidth: data.width, actualHeight: data.height };
             } else if (data.status !== 'mode_warning') {
                 if (data.status === 'disconnected' || data.status === 'stopped') {
+                    finishPendingSettings();
                     endReport();
                     latestStats = {};
                 }
@@ -744,6 +782,7 @@ async function startHostProcess(config, resume = false) {
     });
     child.once('close', code => {
         if (hostProcess !== child) return;
+        finishPendingSettings();
         endReport();
         hostProcess = null;
         activeStreamSerial = '';
@@ -779,7 +818,7 @@ async function stopHostProcess() {
 }
 
 // Keep release preferences under a stable application profile.
-app.setName('ReDisplay 1.2');
+app.setName('ReDisplay 1.3');
 const profileDirectory = path.join(app.getPath('appData'), 'ReDisplay-v1.2.0-demo');
 fs.mkdirSync(profileDirectory, { recursive: true });
 app.setPath('userData', profileDirectory);
@@ -822,57 +861,71 @@ if (!gotTheLock) {
             }
         });
 
+        // All privileged IPC originates from the packaged top-level document.
+        const localPage = require('url').pathToFileURL(path.join(__dirname, 'src', 'index.html')).href;
+        const trusted = event => event.sender === mainWindow?.webContents &&
+            event.senderFrame === event.sender.mainFrame && event.senderFrame?.url === localPage;
+        const handle = (name, fn) => ipcMain.handle(name, (event, ...args) => {
+            if (!trusted(event)) throw new Error('Unexpected IPC origin');
+            return fn(event, ...args);
+        });
+        const on = (name, fn) => ipcMain.on(name, (event, ...args) => {
+            if (trusted(event)) fn(event, ...args);
+        });
         // Window controls
-        ipcMain.on('window-minimize', () => mainWindow?.minimize());
-        ipcMain.on('window-maximize', () => {
+        on('window-minimize', () => mainWindow?.minimize());
+        on('window-maximize', () => {
             if (mainWindow?.isMaximized()) {
                 mainWindow.unmaximize();
             } else {
                 mainWindow?.maximize();
             }
         });
-        ipcMain.on('window-close', () => mainWindow?.close());
-        ipcMain.on('window-hide-to-tray', () => mainWindow?.hide());
-        ipcMain.on('set-language', (event, value) => {
+        on('window-close', () => mainWindow?.close());
+        on('window-hide-to-tray', () => mainWindow?.hide());
+        on('set-language', (event, value) => {
             if (event.sender !== mainWindow?.webContents || !['zh-CN', 'en'].includes(value)) return;
             language = value;
             updateTrayMenu();
         });
-        ipcMain.on('config-changed', (event, newConfig) => {
+        on('config-changed', (event, newConfig) => {
             currentConfig = { ...currentConfig, ...newConfig };
             updateTrayMenu();
         });
 
         // Stream IPC
-        ipcMain.handle('start-stream', (event, config) => startHostProcess(config));
-        ipcMain.handle('stop-stream', () => stopHostProcess());
-        ipcMain.handle('restart-stream', (event, config) => startHostProcess(config));
-        ipcMain.handle('get-service-status', () => ({ running: !!hostProcess }));
+        handle('set-bitrate', (event, bitrate) =>
+            Number.isInteger(bitrate) && bitrate >= 1 && bitrate <= 300 && setLiveSetting('bitrate', bitrate));
+        handle('set-input', (event, enabled) => typeof enabled === 'boolean' && setLiveSetting('input', enabled));
+        handle('start-stream', (event, config) => startHostProcess(config));
+        handle('stop-stream', () => stopHostProcess());
+        handle('restart-stream', (event, config) => startHostProcess(config));
+        handle('get-service-status', () => ({ running: !!hostProcess }));
 
-        ipcMain.handle('get-displays', () => queryHost('--list-displays', 'displays'));
-        ipcMain.handle('get-devices', () => queryHost('--list-devices', 'devices'));
-        ipcMain.handle('get-device-states', getDeviceStates);
-        ipcMain.handle('get-adb-path', () => getAdbPath());
-        ipcMain.handle('choose-adb-folder', () => changeAdb(false));
-        ipcMain.handle('download-adb', () => changeAdb(true));
-        ipcMain.handle('open-adb-download-page', () => shell.openExternal(platformToolsPage));
-        ipcMain.handle('export-performance-report', exportPerformanceReport);
-        ipcMain.handle('get-gpu-info', async () => {
+        handle('get-displays', () => queryHost('--list-displays', 'displays'));
+        handle('get-devices', () => queryHost('--list-devices', 'devices'));
+        handle('get-device-states', getDeviceStates);
+        handle('get-adb-path', () => getAdbPath());
+        handle('choose-adb-folder', () => changeAdb(false));
+        handle('download-adb', () => changeAdb(true));
+        handle('open-adb-download-page', () => shell.openExternal(platformToolsPage));
+        handle('export-performance-report', exportPerformanceReport);
+        handle('get-gpu-info', async () => {
             const displays = await queryHost('--list-displays', 'displays');
             const display = displays.find(d => !d.isVirtual && d.adapter?.includes('NVIDIA'));
             return { gpuName: display?.adapter || t('未识别到活动的 NVIDIA 显卡') };
         });
 
         // Device Probing & Benchmarking
-        ipcMain.handle('check-client-installed', (event, serial) => checkClientInstalled(serial));
-        ipcMain.handle('install-client-apk', (event, serial) => installClientApk(serial));
-        ipcMain.handle('detect-device-specs', (event, serial) => detectDeviceSpecs(serial));
-        ipcMain.handle('test-usb-speed', (event, serial) => testUsbSpeed(serial));
+        handle('check-client-installed', (event, serial) => checkClientInstalled(serial));
+        handle('install-client-apk', (event, serial) => installClientApk(serial));
+        handle('detect-device-specs', (event, serial) => detectDeviceSpecs(serial));
+        handle('test-usb-speed', (event, serial) => testUsbSpeed(serial));
 
         // Driver & Windows Settings
-        ipcMain.handle('get-driver-info', getDriverInfo);
-        ipcMain.handle('manage-driver', (event, action, serial) => manageDriver(action, serial));
-        ipcMain.handle('open-display-settings', () => {
+        handle('get-driver-info', getDriverInfo);
+        handle('manage-driver', (event, action, serial) => manageDriver(action, serial));
+        handle('open-display-settings', () => {
             exec('start ms-settings:display');
             return true;
         });

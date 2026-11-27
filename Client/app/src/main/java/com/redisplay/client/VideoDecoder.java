@@ -44,6 +44,12 @@ public class VideoDecoder {
     private int pendingPeak;
     private final long[] decodeTimesUs = new long[512];
     private final long[] surfaceGapsUs = new long[512];
+    private final long[] inputWaitUs = new long[512], residenceUs = new long[512];
+    // H.264 is configured without B frames. Pair by PTS and discard entries
+    // skipped by the codec; keep the hot path allocation-free even on drops.
+    private final long[] queuedPts = new long[512], queuedTime = new long[512];
+    private int queueHead, queueLength, waitSamples, residenceSamples;
+    private boolean lowLatency;
     private int decodeSamples;
     private int surfaceSamples;
     private long lastSurfaceUs;
@@ -59,6 +65,7 @@ public class VideoDecoder {
     }
 
     public synchronized void setPanelRefreshRate(float hz) {
+        if (Math.abs(panelHz - hz) > 0.5f) lastRequestedVsyncNs = 0;
         panelHz = hz;
     }
 
@@ -67,7 +74,7 @@ public class VideoDecoder {
     }
 
     private long renderTimestampNs(long now) {
-        if (fps != 120 || Math.abs(panelHz - fps) > 0.5f) return now;
+        if (panelHz <= 0 || Math.abs(panelHz - fps) > 0.5f) return now;
         final long anchor = expectedPresentationNs;
         if (anchor <= 0 || Math.abs(anchor - now) > 100_000_000L) return 0;
         final long period = Math.round(1_000_000_000.0 / panelHz);
@@ -111,7 +118,7 @@ public class VideoDecoder {
         surfaceSamples = 0;
         lastSurfaceUs = 0;
         traceOutput.clear();
-        panelHz = 0;
+        waitSamples = residenceSamples = 0;
         openCodec();
     }
 
@@ -155,6 +162,12 @@ public class VideoDecoder {
                             if (picture) {
                                 decodedFrames++;
                                 if (pendingFrames > 0) pendingFrames--;
+                                while (queueLength > 0 && queuedPts[queueHead] <= info.presentationTimeUs) {
+                                    if (queuedPts[queueHead] == info.presentationTimeUs)
+                                        residenceUs[residenceSamples++ % residenceUs.length] = outputUs - queuedTime[queueHead];
+                                    queueHead = (queueHead + 1) % queuedPts.length;
+                                    queueLength--;
+                                }
                                 long duration = outputUs - info.presentationTimeUs;
                                 if (duration >= 0) decodeTimesUs[decodeSamples++ % decodeTimesUs.length] = duration;
                             }
@@ -200,7 +213,9 @@ public class VideoDecoder {
             }, callbackHandler);
 
             MediaFormat format = MediaFormat.createVideoFormat(MIME_TYPE, width, height);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            lowLatency = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && codec.getCodecInfo()
+                    .getCapabilitiesForType(MIME_TYPE).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency);
+            if (lowLatency) {
                 format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
             }
             format.setInteger(MediaFormat.KEY_PRIORITY, 0);
@@ -238,6 +253,7 @@ public class VideoDecoder {
                 }
             }
             final MediaCodec target = codec;
+            final long waitStart = System.nanoTime();
             final long deadline = SystemClock.elapsedRealtime() + 12;
             while (codec == target && inputBuffers.isEmpty()) {
                 long remaining = deadline - SystemClock.elapsedRealtime();
@@ -248,13 +264,22 @@ public class VideoDecoder {
                 droppedFrames++;
                 return false;
             }
+            inputWaitUs[waitSamples++ % inputWaitUs.length] = (System.nanoTime() - waitStart) / 1000;
             Integer index = inputBuffers.pollFirst();
             if (index != null) {
                 ByteBuffer input = target.getInputBuffer(index);
                 if (input != null && input.capacity() >= length) {
                     input.clear();
                     input.put(data, 0, length);
+                    long queuedUs = System.nanoTime() / 1000;
                     target.queueInputBuffer(index, 0, length, timestampUs, 0);
+                    if (queueLength == queuedPts.length) {
+                        queueHead = (queueHead + 1) % queuedPts.length;
+                        queueLength--;
+                    }
+                    int slot = (queueHead + queueLength++) % queuedPts.length;
+                    queuedTime[slot] = queuedUs;
+                    queuedPts[slot] = timestampUs;
                     if (traceId > 0 && traceIds.size() < 512) traceIds.put(timestampUs, traceId);
                     pendingPeak = Math.max(pendingPeak, ++pendingFrames);
                     needsIdr = false;
@@ -280,10 +305,10 @@ public class VideoDecoder {
     static final class Stats {
         final long decoded, submitted, inputDrops, abandoned;
         final int pending, pendingPeak;
-        final long[] decodeUs, surfaceGapsUs;
+        final long[] decodeUs, surfaceGapsUs, inputWait, residence;
 
         Stats(long decoded, long submitted, long inputDrops, long abandoned, int pending,
-              int pendingPeak, long[] decodeUs, long[] surfaceGapsUs) {
+              int pendingPeak, long[] decodeUs, long[] surfaceGapsUs, long[] inputWait, long[] residence) {
             this.decoded = decoded;
             this.submitted = submitted;
             this.inputDrops = inputDrops;
@@ -291,6 +316,8 @@ public class VideoDecoder {
             this.pending = pending;
             this.pendingPeak = pendingPeak;
             this.decodeUs = decodeUs;
+            this.inputWait = inputWait;
+            this.residence = residence;
             this.surfaceGapsUs = surfaceGapsUs;
         }
     }
@@ -298,7 +325,10 @@ public class VideoDecoder {
     synchronized Stats takeStats() {
         Stats stats = new Stats(decodedFrames, submittedFrames, droppedFrames, abandonedFrames,
                 pendingFrames, pendingPeak, Arrays.copyOf(decodeTimesUs, Math.min(decodeSamples, decodeTimesUs.length)),
-                Arrays.copyOf(surfaceGapsUs, Math.min(surfaceSamples, surfaceGapsUs.length)));
+                Arrays.copyOf(surfaceGapsUs, Math.min(surfaceSamples, surfaceGapsUs.length)),
+                Arrays.copyOf(inputWaitUs, Math.min(waitSamples, inputWaitUs.length)),
+                Arrays.copyOf(residenceUs, Math.min(residenceSamples, residenceUs.length)));
+        waitSamples = residenceSamples = 0;
         decodeSamples = 0;
         surfaceSamples = 0;
         pendingPeak = pendingFrames;
@@ -314,7 +344,7 @@ public class VideoDecoder {
     synchronized JSONObject describeCodec() throws JSONException {
         JSONObject result = new JSONObject();
         if (codec == null) return result;
-        result.put("decoder", codec.getName());
+        result.put("decoder", codec.getName()).put("lowLatencyEnabled", lowLatency);
         try {
             MediaCodecInfo info = codec.getCodecInfo();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -340,6 +370,7 @@ public class VideoDecoder {
         pendingFrames = 0;
         lastRequestedVsyncNs = 0;
         lastSurfaceUs = 0;
+        queueLength = queueHead = 0;
         traceIds.clear();
         inputBuffers.clear();
         needsIdr = true;

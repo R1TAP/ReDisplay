@@ -162,11 +162,11 @@ static bool IsValidSerial(const std::string& serial) {
            serial.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-[]%") == std::string::npos;
 }
 
-int AdbManager::SetupPortForward(const std::string& serial, int hostPort, int devicePort) {
+int AdbManager::SetupPortForward(const std::string& serial, int hostPort, const std::string& endpoint) {
     std::string output;
     if (!IsValidSerial(serial) ||
         !ExecuteCommand("-s " + serial + " forward --no-rebind tcp:" + std::to_string(hostPort) +
-                        " tcp:" + std::to_string(devicePort), output)) {
+                        " localabstract:" + endpoint, output)) {
         std::cerr << "[ADB] Forward failed: " << output << '\n';
         return 0;
     }
@@ -189,14 +189,14 @@ void AdbManager::RemovePortForward(const std::string& serial, int hostPort) {
     ExecuteCommand("-s " + serial + " forward --remove tcp:" + std::to_string(hostPort), output);
 }
 
-bool AdbManager::LaunchClientApp(const std::string& serial) {
+bool AdbManager::LaunchClientApp(const std::string& serial, const std::string& endpoint, const std::string& key) {
     if (!IsValidSerial(serial)) return false;
     const std::string prefix = "-s " + serial + " shell ";
     std::string output;
     ExecuteCommand(prefix + "input keyevent KEYCODE_WAKEUP", output);
     output.clear();
-    if (ExecuteCommand(prefix + "am start -W -n com.redisplay.client.v120demo/com.redisplay.client.MainActivity", output) &&
+    if (ExecuteCommand(prefix + "am start -S -W -n com.redisplay.client.v120demo/com.redisplay.client.MainActivity --es endpoint " + endpoint + " --es bootstrap " + key, output) &&
         output.find("Status: ok") != std::string::npos) return true;
-    std::cerr << "[ADB] Android launch failed: " << output << '\n';
+    std::cerr << "[ADB] Android launch failed" << '\n';
     return false;
 }

@@ -23,6 +23,8 @@
 #include "encoder.h"
 #include "capture.h"
 #include "transport.h"
+#include "session.h"
+#include "pointer_input.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -33,6 +35,11 @@ using namespace std::chrono;
 using namespace std::chrono_literals;
 
 static std::atomic<bool> g_running{ true };
+
+// Upper bits identify a streaming session, lower bits carry the requested Mbps.
+static std::atomic<uint64_t> g_bitrateCommand{};
+static std::atomic<uint64_t> g_inputCommand{};
+static unsigned g_sessionNumber = 0;
 
 static BOOL WINAPI ConsoleHandler(DWORD signal) {
     if (signal != CTRL_C_EVENT && signal != CTRL_CLOSE_EVENT) return FALSE;
@@ -153,6 +160,7 @@ struct Settings {
     bool gui = false;
     bool reconnect = true;
     bool trace = false;
+    bool input = false;
 };
 
 static bool ReadInteger(std::string_view value, int& result) {
@@ -182,6 +190,7 @@ static bool LoadSettings(int argc, char* argv[], Settings& config) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--gui") continue;
+        if (arg == "--input") { config.input = true; continue; }
         if (arg == "--trace") { config.trace = true; continue; }
         if (arg == "--no-reconnect") { config.reconnect = false; continue; }
         if (i <= 3 && !arg.starts_with("--")) {
@@ -317,7 +326,7 @@ struct StreamSocket {
     ~StreamSocket() { if (value != INVALID_SOCKET) closesocket(value); }
 };
 
-static SOCKET ConnectToClient(int port) {
+static SOCKET ConnectToClient(int port, SessionKey& key) {
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(static_cast<u_short>(port));
@@ -333,7 +342,9 @@ static SOCKET ConnectToClient(int port) {
         setsockopt(sock.value, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&enabled), sizeof(enabled));
         setsockopt(sock.value, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sendTimeoutMs), sizeof(sendTimeoutMs));
         setsockopt(sock.value, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuffer), sizeof(sendBuffer));
-        if (connect(sock.value, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) {
+        int receiveTimeoutMs = 1800;
+        setsockopt(sock.value, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&receiveTimeoutMs), sizeof(receiveTimeoutMs));
+        if (connect(sock.value, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 && key.Authenticate(sock.value)) {
             return std::exchange(sock.value, INVALID_SOCKET);
         }
         std::this_thread::sleep_for(200ms);
@@ -343,9 +354,17 @@ static SOCKET ConnectToClient(int port) {
 
 class ClientControl {
 public:
-    explicit ClientControl(bool gui) : m_gui(gui) {}
+    ClientControl(bool gui, PointerInput& input, bool enabled)
+        : m_gui(gui), m_input(input), m_inputEnabled(enabled) {}
+
+    void SetInputMode(bool enabled, AsyncNetworkSender& sender) {
+        m_input.Cancel();
+        m_inputEnabled = enabled;
+        sender.SetInputMode(enabled, ++m_inputGeneration);
+    }
 
     bool Poll(SOCKET socket) {
+        if (m_ready && steady_clock::now() - m_lastPong > 6s) return false;
         fd_set readable;
         FD_ZERO(&readable);
         FD_SET(socket, &readable);
@@ -356,7 +375,15 @@ public:
         if (m_payloadSize) {
             if (!Read(socket, m_payload.data(), m_payloadSize)) return false;
             if (m_read == m_payloadSize) {
-                if (m_gui) ReportPayload();
+                if (m_packet.packet_type == PACKET_TYPE_POINTER) {
+                    if (m_inputEnabled && Network64(m_packet.timestamp_us) == m_inputGeneration) {
+                        if (!m_input.Apply(reinterpret_cast<const unsigned char*>(m_payload.data()))) {
+                            std::cerr << "[Input] Target changed or pointer delivery failed (" << GetLastError() << ")\n";
+                            return false;
+                        }
+                        ++inputEvents;
+                    }
+                } else if (m_gui) ReportPayload();
                 m_read = m_payloadSize = 0;
             }
             return true;
@@ -371,12 +398,23 @@ public:
         case PACKET_TYPE_READY:
             if (m_ready || size) return false;
             m_ready = true;
+            m_lastPong = steady_clock::now();
             return true;
         case PACKET_TYPE_REQUEST_IDR:
             if (!m_ready || size) return false;
             requestIdr = true;
             return true;
+        case PACKET_TYPE_POINTER:
+            if (!m_ready || size != 10) return false;
+            m_payloadSize = size;
+            return true;
+        case PACKET_TYPE_INPUT_MODE:
+            if (!m_ready || size) return false;
+            inputModeConfirmed = Network64(m_packet.timestamp_us) == m_inputGeneration &&
+                                 m_packet.flags == static_cast<uint8_t>(m_inputEnabled);
+            return true;
         case PACKET_TYPE_PONG:
+            m_lastPong = steady_clock::now();
             if (!m_ready || (size && size != 16)) return false;
             m_payloadSize = size;
             return true;
@@ -402,6 +440,8 @@ public:
         return m_ready && g_running;
     }
 
+    bool inputModeConfirmed = false;
+    uint64_t inputEvents = 0;
     std::atomic<bool> requestIdr{ false };
 
 private:
@@ -443,6 +483,10 @@ private:
     }
 
     bool m_gui;
+    PointerInput& m_input;
+    bool m_inputEnabled;
+    uint64_t m_inputGeneration = 0;
+    steady_clock::time_point m_lastPong{};
     bool m_ready = false;
     PacketHeader m_packet{};
     std::array<char, MAX_CONTROL_BYTES> m_payload{};
@@ -480,20 +524,22 @@ static uint64_t ProcessCpuUs() {
     return (ticks(kernel) + ticks(user)) / 10;
 }
 
-static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& config) {
+static void Stream(AdbManager& adb, const AdbDevice& android, Settings& config) {
     if (config.gui) {
         std::cout << "{\"type\":\"device_selected\",\"serial\":\"" << EscapeJson(android.serial)
                   << "\",\"model\":\"" << EscapeJson(android.model) << "\"}" << std::endl;
     }
     ReportState(config.gui, "connecting", "Opening an ADB tunnel");
-    const ForwardedPort forward{ adb, android.serial, adb.SetupPortForward(android.serial, config.port, CLIENT_PORT) };
+    SessionKey session;
+    if (!session.Generate()) { ReportState(config.gui, "error", "Session key generation failed"); return; }
+    const ForwardedPort forward{ adb, android.serial, adb.SetupPortForward(android.serial, config.port, session.endpoint) };
     if (!forward.port) {
         ReportState(config.gui, "error", "ADB port forward failed");
         return;
     }
     if (!g_running) return;
     ReportState(config.gui, "launching_app", "Launching ReDisplay on " + android.model);
-    if (!adb.LaunchClientApp(android.serial) || !g_running) {
+    if (!adb.LaunchClientApp(android.serial, session.endpoint, session.BootstrapKey()) || !g_running) {
         ReportState(config.gui, "error", "ReDisplay could not start on Android");
         return;
     }
@@ -513,19 +559,22 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
         return;
     }
 
-    StreamSocket sock{ ConnectToClient(forward.port) };
+    StreamSocket sock{ ConnectToClient(forward.port, session) };
     if (sock.value == INVALID_SOCKET) {
         ReportState(config.gui, "error", "Could not connect to the Android receiver");
         return;
     }
 
+    const unsigned sessionNumber = ++g_sessionNumber;
+    std::mutex encoderMutex;
     NvEncoderD3D11 encoder;
     AsyncNetworkSender sender(sock.value, config.bufferMode == "smooth" ? 12 : 2, config.trace);
     std::mutex statsMutex;
     EncodeStats encodeStats;
     uint64_t previousEncodeStart = 0;
     uint64_t previousFrameId = 0;
-    ClientControl control(config.gui);
+    PointerInput pointer(display);
+    ClientControl control(config.gui, pointer, config.input);
     bool needIdr = true;
     unsigned consecutiveEncodeFailures = 0;
     std::atomic<bool> encodeHealthy{ true };
@@ -538,7 +587,12 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
         packet.payload = sender.TakePayloadBuffer();
         bool keyframe = false;
         if (control.requestIdr.exchange(false)) needIdr = true;
-        if (!encoder.EncodeFrame(texture, needIdr, packet.payload, keyframe) ||
+        bool encoded;
+        {
+            std::lock_guard lock(encoderMutex);
+            encoded = encoder.EncodeFrame(texture, needIdr, packet.payload, keyframe);
+        }
+        if (!encoded ||
             packet.payload.empty() || packet.payload.size() > MAX_VIDEO_BYTES) {
             needIdr = true;
             {
@@ -583,7 +637,7 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
         ReportState(config.gui, "error", "NVENC encoder initialization failed");
         return;
     }
-    const PacketHeader header{ htonl(REDISPLAY_MAGIC), PACKET_TYPE_CONFIG, 0, htons(config.trace ? CLIENT_TRACE_V1 : CLIENT_TELEMETRY_V1), 0, htonl(sizeof(ConfigPayload)) };
+    const PacketHeader header{ htonl(REDISPLAY_MAGIC), PACKET_TYPE_CONFIG, static_cast<uint8_t>(config.input), htons(config.trace ? CLIENT_TRACE_V1 : CLIENT_TELEMETRY_V1), 0, htonl(sizeof(ConfigPayload)) };
     const ConfigPayload payload{ htonl(width), htonl(height), htonl(fps) };
     if (!SendPacket(sock.value, header, &payload, sizeof(payload)) || !control.WaitForReady(sock.value)) {
         if (g_running) ReportState(config.gui, "error", "Android decoder did not become ready");
@@ -598,6 +652,7 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
     if (config.gui) {
         std::cout << "{\"type\":\"state\",\"status\":\"streaming\",\"display\":" << display.index
                   << ",\"width\":" << width << ",\"height\":" << height << ",\"fps\":" << fps
+                  << ",\"session\":" << sessionNumber << ",\"input\":" << (config.input ? "true" : "false")
                   << ",\"displayHz\":" << display.fps << ",\"bitrate\":" << config.bitrate << ",\"device\":\"" << EscapeJson(android.model)
                   << "\",\"encoderProfile\":\"" << config.profile << "\",\"codec\":\"H.264\",\"chroma\":\"4:2:0\""
                   << ",\"rateControl\":\"CBR\",\"nvencPreset\":\"" << encoder.PresetName() << "\""
@@ -613,6 +668,27 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
     uint64_t lastCpu = ProcessCpuUs();
     while (g_running && sender.alive && capture.IsHealthy() && encodeHealthy && control.Poll(sock.value)) {
         const auto now = steady_clock::now();
+        if (std::exchange(control.inputModeConfirmed, false)) {
+            std::cout << "{\"type\":\"input_result\",\"session\":" << sessionNumber
+                      << ",\"input\":" << (config.input ? "true" : "false") << ",\"success\":true}" << std::endl;
+        }
+        const auto inputCommand = g_inputCommand.exchange(0);
+        if (inputCommand && (inputCommand >> 32) == sessionNumber) {
+            config.input = (inputCommand & 1) != 0;
+            control.SetInputMode(config.input, sender);
+        }
+        const auto command = g_bitrateCommand.exchange(0);
+        if (command && (command >> 32) == sessionNumber) {
+            int mbps = static_cast<int>(command & 0xffffffff);
+            bool success;
+            {
+                std::lock_guard lock(encoderMutex);
+                success = encoder.SetBitrate(mbps);
+            }
+            if (success) config.bitrate = mbps;
+            std::cout << "{\"type\":\"bitrate_result\",\"session\":" << sessionNumber
+                      << ",\"bitrate\":" << mbps << ",\"success\":" << (success ? "true" : "false") << '}' << std::endl;
+        }
         if (now - lastTime < 500ms) continue;
 
         const double elapsed = duration<double>(now - lastTime).count();
@@ -647,7 +723,7 @@ static void Stream(AdbManager& adb, const AdbDevice& android, const Settings& co
                       << ",\"encodeP95Ms\":" << PercentileMs(encoded.durations, count, 95)
                       << ",\"encodeP99Ms\":" << PercentileMs(encoded.durations, count, 99)
                       << ",\"encodeGapP95Ms\":" << PercentileMs(encoded.intervals, gaps, 95)
-                      << ",\"encodeFailures\":" << encoded.failures
+                      << ",\"inputEvents\":" << control.inputEvents << ",\"encodeFailures\":" << encoded.failures
                       << ",\"encodeSamples\":" << encoded.frames
                       << ",\"captureToEncodeAvgMs\":" << AverageMs(encoded.captureToEncodeUs, encoded.frames)
                       << ",\"hostCpuPercent\":" << cpuPercent
@@ -705,7 +781,7 @@ int main(int argc, char* argv[]) {
             std::cout << (DisplayManager::IsVddDriverInstalled() ? "true" : "false") << std::endl;
             return 0;
         }
-        if (arg == "--version") { std::cout << "ReDisplay Host 1.2.0\n"; return 0; }
+        if (arg == "--version") { std::cout << "ReDisplay Host 1.3.1\n"; return 0; }
         if (arg == "--gui") config.gui = true;
     }
     if (!LoadSettings(argc, argv, config)) {
@@ -729,7 +805,22 @@ int main(int argc, char* argv[]) {
     if (config.gui && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_PIPE) {
         std::thread([] {
             // Electron closes the pipe when it stops the Host or exits.
-            std::cin.get();
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                const auto nameEnd = line.find(' ');
+                if (nameEnd == std::string::npos) continue;
+                const auto valueStart = line.find(' ', nameEnd + 1);
+                if (valueStart == std::string::npos) continue;
+                const std::string_view command(line);
+                int session = 0, value = 0;
+                if (!ReadInteger(command.substr(nameEnd + 1, valueStart - nameEnd - 1), session) || session < 1 ||
+                    !ReadInteger(command.substr(valueStart + 1), value)) continue;
+                const auto name = command.substr(0, nameEnd);
+                if (name == "bitrate" && value > 0 && value <= 300)
+                    g_bitrateCommand = (uint64_t(session) << 32) | uint32_t(value);
+                if (name == "input" && (value == 0 || value == 1))
+                    g_inputCommand = (uint64_t(session) << 32) | uint32_t(value);
+            }
             g_running = false;
         }).detach();
     }

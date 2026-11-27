@@ -77,7 +77,8 @@
         fps: $('slider-fps'),
         bitrate: $('slider-bitrate'),
         reconnect: $('switch-autoreconnect'),
-        trace: $('switch-trace')
+        trace: $('switch-trace'),
+        input: $('switch-input')
     };
     const profiles = window.ReDisplayProfiles;
     const formatters = new Map();
@@ -103,9 +104,11 @@
         bufferMode: 'lowlatency'
     };
     const profileButtons = document.querySelectorAll('[data-profile]');
-    const bitrateButtons = document.querySelectorAll('[data-val]');
+    const bitrateSteps = [20, 40, 60, 80, 100];
+    let inputChangePending = false;
     const bufferButtons = document.querySelectorAll('[data-mode]');
     let preferredFps = settings.fps;
+    let manualFps = false;
     const standardSizes = [[1920, 1080], [2560, 1440], [1920, 1200], [2560, 1600]]
         .flatMap(([width, height]) => [{ width, height }, { width: height, height: width }]);
     const virtualRates = [60, 90, 120, 144, 180];
@@ -469,7 +472,10 @@
             renderDisplay();
             renderDriverAction();
             const adapter = displays.find(d => !d.isVirtual && d.adapter?.includes('NVIDIA'))?.adapter;
-            $('stat-gpu-desc').textContent = adapter || '—';
+            const familyAndModel = adapter?.match(/^((?:NVIDIA\s+)?GeForce)\s+(.+)$/i);
+            setText('stat-gpu-model', familyAndModel?.[2] || adapter || '—');
+            setText('stat-gpu-family', familyAndModel?.[1] || '');
+            $('stat-gpu-family').hidden = !familyAndModel;
             $('stat-gpu-desc').title = adapter || '';
         } catch (error) {
             appendLog(t('显示器检查失败 · {error}', { error: error.message }), 'error');
@@ -601,11 +607,13 @@
 
         controls.fps.max = rates.length - 1;
         controls.fps.disabled = !display || rates.length < 2 || applying || Boolean(preview) || stopping;
-        $('fps-ticks').replaceChildren(...rates.map(rate => {
-            const label = document.createElement('span');
-            label.textContent = rate;
-            return label;
-        }));
+        renderRangeTicks('fps-ticks', rates, changeFps);
+        if (!manualFps && !serviceActive) {
+            const panel = deviceSpecs.get(controls.device.value)?.panelRates || [];
+            const advertised = display?.isVirtual ? displayRates : rates;
+            const match = rates.findLast(rate => advertised.includes(rate) && panel.includes(rate));
+            if (match) preferredFps = match;
+        }
         setFps(preferredFps);
         renderRecommendation();
     }
@@ -650,10 +658,13 @@
         }
         const sameSize = targetWidth === sourceWidth && targetHeight === sourceHeight;
         const cap = Math.min(panelFps || Infinity, (sameSize && codecLimit) || Infinity);
-        const targetRates = display?.isVirtual ? [...new Set([...virtualRates, ...(display.modes || [])
-            .filter(mode => mode.width === targetWidth && mode.height === targetHeight).map(mode => mode.fps)])]
-            .sort((a, b) => a - b) : rates;
-        const targetFps = Number.isFinite(cap) ? targetRates.findLast(rate => rate <= cap && rate <= settings.fps) : settings.fps;
+        const windowsRates = display?.isVirtual ? (display.modes || [])
+            .filter(mode => mode.width === targetWidth && mode.height === targetHeight)
+            .map(mode => mode.fps) : rates;
+        const actualPanelRates = panelRates.length ? panelRates : specs?.panelRates || [];
+        const candidates = [...new Set(windowsRates)].filter(rate => rate <= cap && rate <= settings.fps)
+            .sort((a, b) => b - a);
+        const targetFps = candidates.find(rate => actualPanelRates.includes(rate)) || candidates[0];
         recommendation = display && targetFps && (targetWidth !== sourceWidth || targetHeight !== sourceHeight ||
             targetFps !== settings.fps) ? { width: targetWidth, height: targetHeight, fps: targetFps } : null;
         $('device-recommendation').hidden = !recommendation;
@@ -672,10 +683,31 @@
         slider.style.setProperty('--range-progress', fraction * 100 + '%');
     }
 
+    function renderRangeTicks(id, values, onChange) {
+        $(id).replaceChildren(...values.map(value => {
+            const slot = document.createElement('span');
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.dataset.streamSetting = '';
+            button.disabled = applying || Boolean(preview) || stopping ||
+                (id === 'fps-ticks' && (!captureSource() || values.length < 2));
+            button.value = value;
+            button.textContent = value;
+            button.addEventListener('click', () => onChange(value));
+            slot.append(button);
+            return slot;
+        }));
+    }
+
+    function updateRangeTicks(id, value) {
+        for (const button of $(id).querySelectorAll('button')) {
+            button.setAttribute('aria-pressed', String(Number(button.value) === value));
+        }
+    }
+
     function showFps(fps) {
         syncSlider(controls.fps);
-        [...$('fps-ticks').children].forEach((tick, index) =>
-            index === Number(controls.fps.value) ? tick.setAttribute('aria-current', 'true') : tick.removeAttribute('aria-current'));
+        updateRangeTicks('fps-ticks', fps);
         $('val-fps').textContent = `${fps} FPS`;
         controls.fps.setAttribute('aria-valuetext', t('每秒 {fps} 帧', { fps }));
     }
@@ -689,13 +721,14 @@
     }
 
     controls.fps.addEventListener('input', () => showFps(rates[Number(controls.fps.value)]));
-    controls.fps.addEventListener('change', () => {
-        const fps = rates[Number(controls.fps.value)];
+    function changeFps(fps) {
+        manualFps = true;
         if (settings.fps === fps) return;
         setFps(fps);
         renderRecommendation();
         settingsChanged();
-    });
+    }
+    controls.fps.addEventListener('change', () => changeFps(rates[Number(controls.fps.value)]));
 
     function selectButtons(buttons, key, value) {
         buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset[key] === String(value))));
@@ -706,7 +739,7 @@
         syncSlider(controls.bitrate);
         $('val-bitrate').textContent = `${value} Mbps`;
         controls.bitrate.setAttribute('aria-valuetext', `${value} Mbps`);
-        selectButtons(bitrateButtons, 'val', value);
+        updateRangeTicks('bitrate-ticks', value);
     }
 
     function setBufferMode(mode) {
@@ -718,10 +751,12 @@
         if (config.serial !== undefined) controls.device.value = config.serial;
         if (config.displayName !== undefined) controls.display.value = config.displayName || '';
         if (config.autoReconnect !== undefined) controls.reconnect.checked = config.autoReconnect;
+        if (config.input !== undefined) controls.input.checked = config.input;
         if (config.trace !== undefined) controls.trace.checked = config.trace;
         if (config.width && config.height) setResolution(config.width, config.height);
         settings.profile = config.profile || settings.profile;
         settings.bitrate = config.bitrate ?? settings.bitrate;
+        if (config.fps !== undefined) manualFps = true;
         preferredFps = config.fps ?? preferredFps;
         setBitrate(settings.bitrate);
         setBufferMode(config.bufferMode || settings.bufferMode);
@@ -743,13 +778,31 @@
     }
     controls.bitrate.addEventListener('input', () => setBitrate(Number(controls.bitrate.value)));
     controls.bitrate.addEventListener('change', () => changeBitrate(Number(controls.bitrate.value)));
-    bitrateButtons.forEach(button => button.addEventListener('click', () => changeBitrate(Number(button.dataset.val))));
+    renderRangeTicks('bitrate-ticks', bitrateSteps, changeBitrate);
     bufferButtons.forEach(button => button.addEventListener('click', () => {
         setBufferMode(button.dataset.mode);
         settingsChanged();
     }));
     controls.reconnect.addEventListener('change', settingsChanged);
     controls.trace.addEventListener('change', settingsChanged);
+    controls.input.addEventListener('change', async () => {
+        if (!serviceActive) {
+            settingsChanged();
+            return;
+        }
+        if (!activeMode || inputChangePending) return;
+        inputChangePending = true;
+        renderPendingSettings();
+        try {
+            if (!await api.setInput(controls.input.checked)) throw new Error('Input confirmation unavailable');
+        } catch {
+            controls.input.checked = activeMode?.input ?? savedConfig?.input ?? false;
+            if (activeMode) showFeedback('触控设置未获确认，请重试。', {}, 'warning');
+        } finally {
+            inputChangePending = false;
+            renderPendingSettings();
+        }
+    });
 
     function streamConfig() {
         const display = selectedDisplay();
@@ -760,6 +813,7 @@
             displayName: controls.display.value,
             orientation: settings.height > settings.width ? 'portrait' : 'landscape',
             autoReconnect: controls.reconnect.checked,
+            input: controls.input.checked,
             trace: controls.trace.checked
         };
     }
@@ -775,14 +829,25 @@
         showText('stream-feedback', message, values);
     }
 
+    function bitrateOnly(draft) {
+        return activeMode && savedConfig && draft.bitrate !== savedConfig.bitrate &&
+            Object.keys(draft).every(key => key === 'display' || key === 'bitrate' || key === 'input' || draft[key] === savedConfig[key]);
+    }
+
     function renderPendingSettings() {
         const draft = streamConfig();
         const pending = serviceActive && !stopping && !applying && !preview && savedConfig &&
-            Object.keys(draft).some(key => key !== 'display' && draft[key] !== savedConfig[key]);
+            Object.keys(draft).some(key => key !== 'display' && key !== 'input' && draft[key] !== savedConfig[key]);
         $('draft-banner').hidden = !pending;
+        $('btn-apply-settings').disabled = inputChangePending;
+        controls.input.disabled = inputChangePending || applying || Boolean(preview) || stopping ||
+            (serviceActive && !activeMode);
+        if (pending) showText('draft-description', bitrateOnly(draft)
+            ? '此次仅调整码率，画面将持续播放。' : '更改将在串流重新连接后生效。');
         for (const control of document.querySelectorAll('[data-stream-setting]')) {
             control.disabled = applying || Boolean(preview) || stopping ||
-                (control === controls.fps && (!captureSource() || rates.length < 2));
+                ((control === controls.fps || control.parentElement?.parentElement?.id === 'fps-ticks') &&
+                    (!captureSource() || rates.length < 2));
         }
         renderPresentation();
         renderDriverAction();
@@ -828,8 +893,26 @@
     }
 
     async function restartForPreview() {
-        if (applying || preview || stopping || !serviceActive) return;
-        const next = { config: streamConfig() };
+        if (applying || preview || stopping || inputChangePending || !serviceActive) return;
+        const draft = streamConfig();
+        if (bitrateOnly(draft)) {
+            applying = true;
+            renderPendingSettings();
+            try {
+                const applied = await api.setBitrate(draft.bitrate);
+                if (applied && savedConfig && activeMode) {
+                    savedConfig.bitrate = draft.bitrate;
+                    activeMode.bitrate = draft.bitrate;
+                    renderActiveMode();
+                    showFeedback('已将码率调整为 {bitrate} Mbps。', draft);
+                } else if (serviceActive) showFeedback('码率调整未获确认，请重试。', {}, 'warning');
+            } finally {
+                applying = false;
+                renderPendingSettings();
+            }
+            return;
+        }
+        const next = { config: draft };
         preview = next;
         applying = true;
         resetSession();
@@ -968,9 +1051,8 @@
     function updateStats(data) {
         liveMbps = data.mbps;
         setText('stat-fps', number(data.fps, 1));
-        showText('stat-fps-desc', '采集 {capture} · 编码 {encode}', {
-            capture: number(data.wgcFps, 1), encode: number(data.encodeFps, 1)
-        });
+        setText('stat-capture-fps', units(data.wgcFps, 'FPS', 1));
+        setText('stat-encode-fps', units(data.encodeFps, 'FPS', 1));
         setText('stat-bitrate', number(data.mbps, 1));
         setText('stat-latency', data.encodeSamples ? number(data.encodeMs, 2) : '—');
         setText('stat-encode-tail', data.encodeSamples ? 'P95 ' + units(data.encodeP95Ms, 'ms', 2) : 'P95 —');
@@ -993,7 +1075,9 @@
         setText('stat-client-decode', number(data.decodedFps, 1));
         setText('stat-client-surface', number(data.surfaceFps, 1));
         showText('stat-client-rx-note', '完整视频帧');
-        setText('stat-client-decode-time', data.decode?.samples ? 'P95 ' + units(data.decode.p95Ms, 'ms', 2) : 'P95 —');
+        showText('stat-client-decode-time', '输入等待 {wait} · 解码 {codec}（P95）', {
+            wait: units(data.inputWait?.p95Ms, 'ms', 2), codec: units(data.codecResidence?.p95Ms, 'ms', 2)
+        });
         if (data.surfaceGap?.samples) {
             showText('stat-client-surface-gap', '间隔 P95 {ms} ms', { ms: number(data.surfaceGap.p95Ms, 2) });
         } else showText('stat-client-surface-gap', '—');
@@ -1041,18 +1125,19 @@
 
     function resetStats() {
         liveMbps = undefined;
-        for (const id of ['stat-fps', 'stat-bitrate', 'stat-latency', 'stat-frames',
+        for (const id of ['stat-fps', 'stat-capture-fps', 'stat-encode-fps', 'stat-bitrate', 'stat-latency', 'stat-frames',
             'stat-client-rx', 'stat-client-decode', 'stat-client-surface', 'stat-client-decode-time', 'usb-stream-rate',
             'stat-client-panel', 'stat-client-drops', 'stat-client-pending', 'stat-client-info',
             'stat-send-queue', 'stat-queue-peak', 'stat-layer-present', 'stat-layer-gap', 'stat-trace-latency',
-            'stat-trace-clock', 'stat-host-cpu', 'stat-host-gpu', 'stat-frame-gap', 'stream-mode', 'card-fps-target']) {
+            'stat-trace-clock', 'stat-host-cpu', 'stat-host-gpu', 'stat-frame-gap', 'stream-mode', 'stream-refresh']) {
             labels.delete(id);
             $(id).textContent = '—';
             $(id).removeAttribute('title');
         }
-        for (const id of ['stat-client-surface-gap', 'badge-drop-rate', 'stat-fps-desc', 'stat-client-rx-note']) {
+        for (const id of ['stat-client-surface-gap', 'badge-drop-rate', 'card-fps-target', 'stat-client-rx-note']) {
             showText(id, '—');
         }
+        $('stream-refresh').hidden = true;
         $('stat-encode-tail').textContent = 'P95 —';
         $('badge-drop-rate').classList.remove('warning');
     }
@@ -1068,6 +1153,15 @@
     api.onStreamEvent(data => {
         if (data.type === 'stats') {
             updateStats(data);
+        } else if (data.type === 'input_result' && data.success && activeMode?.session === data.session) {
+            activeMode.input = controls.input.checked = data.input;
+            if (savedConfig) savedConfig.input = data.input;
+            renderPendingSettings();
+        } else if (data.type === 'bitrate_result' && data.success && activeMode?.session === data.session) {
+            activeMode.bitrate = data.bitrate;
+            if (savedConfig) savedConfig.bitrate = data.bitrate;
+            renderActiveMode();
+            renderPendingSettings();
         } else if (data.type === 'client_info') {
             const info = data.metrics;
             if (activeSerial && activeMode) {
@@ -1106,6 +1200,8 @@
                 serviceActive = true;
                 resetStats();
                 activeMode = data;
+                controls.input.checked = data.input === true;
+                if (savedConfig && !preview) savedConfig.input = controls.input.checked;
                 traceActive = data.trace === true;
                 presentationReceived = false;
                 applying = false;
@@ -1113,16 +1209,23 @@
                 renderPendingSettings();
                 const source = displays.find(display => display.index === data.display);
                 if (source) {
-                    showText('val-display', '{label} · {width} × {height} · Windows {displayHz} Hz', { ...data, label: () => displayLabel(source) });
+                    showText('val-display', '{label} · {width} × {height} · {fps} Hz', {
+                        ...data, fps: data.displayHz, label: () => displayLabel(source)
+                    });
                 }
-                $('stream-mode').textContent = data.width + ' × ' + data.height + ' · ' + units(data.displayHz, 'Hz');
-                $('card-fps-target').textContent = units(data.fps, 'FPS');
+                setText('stream-mode', data.width + ' × ' + data.height);
+                setText('stream-refresh', units(data.displayHz > 0 ? data.displayHz : undefined, 'Hz'));
+                $('stream-refresh').hidden = !(data.displayHz > 0);
+                showText('card-fps-target', '目标 {fps} FPS', data);
                 showFeedback('');
                 setStatus('streaming', '串流中 · 目标 {fps} FPS', undefined, data);
                 showPreview(data);
                 appendLog(t('串流已建立 · {mode}', { mode: data.width + ' × ' + data.height + ' / ' + data.fps + ' FPS' }));
             } else if (connectingLabels[data.status]) {
-                if (data.status === 'disconnected') resetSession();
+                if (data.status === 'disconnected') {
+                    resetSession();
+                    renderPendingSettings();
+                }
                 if (data.phase === 'resuming') serviceActive = true;
                 const phase = { installing: '正在安装 Android 应用', resuming: '正在恢复休眠前的串流' };
                 const message = phase[data.phase] || connectingLabels[data.status];

@@ -131,10 +131,29 @@ bool NvEncoderD3D11::Initialize(ID3D11Device* pDevice, int width, int height, in
     }
     m_bitstreamBuffer = createBuffer.bitstreamBuffer;
 
+    m_config = encConfig;
+    m_init = initParams;
+    m_init.encodeConfig = &m_config;
     m_initialized = true;
     std::cout << "[NVENC] Ultra-low latency encoder initialized ("
               << m_width << "x" << m_height << " @" << m_fps << "Hz, "
               << m_bitrateMbps << " Mbps CBR)" << std::endl;
+    return true;
+}
+
+bool NvEncoderD3D11::SetBitrate(int mbps) {
+    if (!m_initialized || mbps < 1 || mbps > 300) return false;
+    if (mbps == m_bitrateMbps) return true;
+    auto next = m_config;
+    next.rcParams.averageBitRate = next.rcParams.maxBitRate = mbps * 1000000u;
+    next.rcParams.vbvBufferSize = next.rcParams.averageBitRate / m_fps * m_vbvFrames;
+    NV_ENC_RECONFIGURE_PARAMS params{};
+    params.version = NV_ENC_RECONFIGURE_PARAMS_VER;
+    params.reInitEncodeParams = m_init;
+    params.reInitEncodeParams.encodeConfig = &next;
+    if (m_nvList.nvEncReconfigureEncoder(m_hEncoder, &params) != NV_ENC_SUCCESS) return false;
+    m_config = next;
+    m_bitrateMbps = mbps;
     return true;
 }
 

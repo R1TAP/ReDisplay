@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('api', {
     // Service controls
     startStream: (config) => ipcRenderer.invoke('start-stream', config),
     stopStream: () => ipcRenderer.invoke('stop-stream'),
+    setInput: enabled => ipcRenderer.invoke('set-input', enabled),
+    setBitrate: bitrate => ipcRenderer.invoke('set-bitrate', bitrate),
     restartStream: (config) => ipcRenderer.invoke('restart-stream', config),
     getServiceStatus: () => ipcRenderer.invoke('get-service-status'),
 

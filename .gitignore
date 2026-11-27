@@ -1,13 +1,8 @@
-# Build output
+# Build and release output
 /scratch/
 /Host/bin/
 /Client/bin/
-/Client/build/
-/Release/bin/
-/Release/Archive/
-/Release/ReDisplay-*/
-/Release/*.zip
-/Release/SHA256SUMS.txt
+/Release/
 *.obj
 *.o
 *.pdb
@@ -20,9 +15,15 @@
 *.pch
 *.exe
 *.dll
+
 # Required upstream driver and device installer
 !/Driver/nefcon.exe
 !/Driver/files/MttVDD.dll
+
+# Local test runs and planning notes
+/Tests/
+/性能与升级验收/
+/V1.3.0-升级指南.md
 
 # Dependencies and generated Android/Python files
 node_modules/
@@ -64,7 +65,3 @@ local.properties
 Thumbs.db
 Desktop.ini
 .DS_Store
-/docs/
-/Tests/
-/Release/
-CHANGELOG.md

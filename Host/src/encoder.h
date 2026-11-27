@@ -16,6 +16,7 @@ public:
 
     bool Initialize(ID3D11Device* pDevice, int width, int height, int fps, int bitrateMbps, std::string_view profile);
     bool EncodeFrame(ID3D11Texture2D* pTexture, bool forceIdr, std::vector<uint8_t>& outBitstream, bool& isKeyframe);
+    bool SetBitrate(int mbps);
     void Destroy();
 
     const char* PresetName() const { return m_officePreset ? "P2/ULL" : "P1/ULL"; }
@@ -34,6 +35,8 @@ private:
     int m_bitrateMbps;
 
     NV_ENC_OUTPUT_PTR m_bitstreamBuffer;
+    NV_ENC_CONFIG m_config{};
+    NV_ENC_INITIALIZE_PARAMS m_init{};
     bool m_initialized;
     bool m_officePreset = false;
     unsigned m_vbvFrames = 2;

@@ -15,10 +15,10 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
+import android.net.LocalServerSocket;
+import android.net.LocalSocket;
+import android.system.Os;
+import android.system.OsConstants;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -26,7 +26,6 @@ import java.util.Locale;
 
 public class NetworkServer implements Runnable {
     private static final String TAG = "ReDisplay_Net";
-    public static final int PORT = 27185;
     private static final int MAGIC = 0x52445350; // RDSP
     private static final int VIDEO = 1;
     private static final int CONFIG = 2;
@@ -37,13 +36,16 @@ public class NetworkServer implements Runnable {
     private static final int CLIENT_INFO = 7;
     private static final int CLIENT_STATS = 8;
     private static final int CLIENT_TRACE = 9;
-    private static final int TELEMETRY_V1 = 0x1201;
-    private static final int TRACE_V1 = 0x1202;
+    static final int POINTER = 10;
+    private static final int INPUT_MODE = 11;
+    private static final int TELEMETRY_V1 = 0x1301;
+    private static final int TRACE_V1 = 0x1302;
     private static final int MAX_CONTROL_BYTES = 4096;
     private static final int MAX_VIDEO_BYTES = 4 * 1024 * 1024;
 
     public interface StatusListener {
-        void onConnected(String hostInfo);
+        void onConnected(boolean inputEnabled);
+        void onInputModeChanged(boolean enabled);
         void onDisconnected();
         void onResolutionChanged(int width, int height, int fps);
         void onStatsUpdate(float fps, int bitrateKbps);
@@ -53,18 +55,25 @@ public class NetworkServer implements Runnable {
     private final StatusListener listener;
     private final DisplayManager displays;
     private volatile boolean running;
-    private ServerSocket serverSocket;
-    private Socket clientSocket;
+    private LocalServerSocket serverSocket;
+    private final String endpoint, bootstrap;
+    private volatile PointerSender pointers;
+    private volatile long lastPacketMs;
+    PointerSender pointers() { return pointers; }
+    private LocalSocket clientSocket;
     private Thread serverThread;
 
-    public NetworkServer(VideoDecoder decoder, StatusListener listener, DisplayManager displays) {
+    public NetworkServer(VideoDecoder decoder, StatusListener listener, DisplayManager displays, String endpoint, String bootstrap) {
         this.decoder = decoder;
         this.listener = listener;
         this.displays = displays;
+        this.endpoint = endpoint;
+        this.bootstrap = bootstrap;
     }
 
     public synchronized void start() {
-        if (serverThread != null) return;
+        if (serverThread != null || endpoint == null || !endpoint.matches("redisplay13_[0-9a-f]{32}") ||
+                bootstrap == null || !bootstrap.matches("[0-9a-f]{64}")) return;
         running = true;
         serverThread = new Thread(this, "ReDisplay-NetServer");
         serverThread.start();
@@ -73,9 +82,10 @@ public class NetworkServer implements Runnable {
     public synchronized void stop() {
         running = false;
         if (clientSocket != null) {
-            try { clientSocket.close(); } catch (IOException ignored) {}
+            closePeer(clientSocket);
         }
         if (serverSocket != null) {
+            try { Os.shutdown(serverSocket.getFileDescriptor(), OsConstants.SHUT_RDWR); } catch (Exception ignored) {}
             try { serverSocket.close(); } catch (IOException ignored) {}
         }
         if (serverThread != null) serverThread.interrupt();
@@ -84,44 +94,57 @@ public class NetworkServer implements Runnable {
     @Override
     public void run() {
         byte[] payload = new byte[MAX_VIDEO_BYTES];
-        while (running) {
-            try (ServerSocket listenerSocket = new ServerSocket()) {
+        try {
+            LocalServerSocket listenerSocket = new LocalServerSocket(endpoint);
+            try {
                 synchronized (this) {
-                    if (!running) break;
+                    if (!running) return;
                     serverSocket = listenerSocket;
                 }
-                listenerSocket.setReuseAddress(true);
-                listenerSocket.setReceiveBufferSize(256 * 1024);
-                listenerSocket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT));
-                Log.i(TAG, "Listening via ADB on 127.0.0.1:" + PORT);
                 while (running) {
-                    try (Socket socket = listenerSocket.accept()) {
+                    LocalSocket socket = listenerSocket.accept();
+                    try {
+                        int uid = socket.getPeerCredentials().getUid();
+                        if (uid != 2000 && uid != 0) continue;
                         synchronized (this) {
-                            if (!running) break;
+                            if (!running) return;
                             clientSocket = socket;
                         }
-                        socket.setTcpNoDelay(true);
-                        socket.setSoTimeout(3500);
-                        handleClient(socket, payload);
-                    } catch (EOFException e) {
-                        Log.i(TAG, "Host closed the connection");
+                        socket.setSoTimeout(4500);
+                        lastPacketMs = SystemClock.elapsedRealtime();
+                        Thread watchdog = new Thread(() -> {
+                            try {
+                                while (!Thread.interrupted()) {
+                                    Thread.sleep(500);
+                                    if (SystemClock.elapsedRealtime() - lastPacketMs > 5000) {
+                                        closePeer(socket);
+                                        return;
+                                    }
+                                }
+                            } catch (InterruptedException ignored) {}
+                        }, "ReDisplay-Keepalive");
+                        watchdog.start();
+                        try { handleClient(socket, payload); }
+                        finally { watchdog.interrupt(); }
                     } catch (IOException e) {
-                        if (running) Log.w(TAG, "Connection ended: " + e.getMessage());
+                        if (running) Log.i(TAG, "Connection ended: " + e.getMessage());
                     } finally {
+                        closePeer(socket);
                         synchronized (this) { clientSocket = null; }
-                        decoder.endStream();
-                        if (running) listener.onDisconnected();
                     }
                 }
-            } catch (IOException e) {
-                if (running) {
-                    Log.w(TAG, "Listener failed: " + e.getMessage());
-                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-                }
-            } finally {
-                synchronized (this) { serverSocket = null; }
-            }
+            } finally { listenerSocket.close(); }
+        } catch (IOException e) {
+            if (running) Log.w(TAG, "Listener failed", e);
+        } finally {
+            synchronized (this) { serverSocket = null; }
         }
+    }
+
+    private static void closePeer(LocalSocket socket) {
+        try { socket.shutdownInput(); } catch (IOException ignored) {}
+        try { socket.shutdownOutput(); } catch (IOException ignored) {}
+        try { socket.close(); } catch (IOException ignored) {}
     }
 
     private static final class ReceivedVideo {
@@ -138,15 +161,17 @@ public class NetworkServer implements Runnable {
         }
     }
 
-    private void handleClient(Socket socket, byte[] payload) throws IOException {
+    private void handleClient(LocalSocket socket, byte[] payload) throws IOException {
         DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 64 * 1024));
         DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+        SessionAuth.verify(in, out, bootstrap);
         ReceivedVideo received = new ReceivedVideo();
         boolean configured = false;
         boolean trace = false;
         long lastIdrRequest = -100;
         long lastPresentationUs = 0;
         Thread reporter = null;
+        Thread inputWriter = null;
 
         try {
             while (running) {
@@ -174,9 +199,14 @@ public class NetworkServer implements Runnable {
                         Thread.currentThread().interrupt();
                         throw new IOException("Interrupted while waiting for decoder", e);
                     }
-                    socket.setSoTimeout(0);
+                    if ((flags & ~1) != 0 || (reserved != TRACE_V1 && reserved != TELEMETRY_V1))
+                        throw new IOException("Unsupported session configuration");
                     sendControl(out, READY, 0, null);
-                    listener.onConnected(socket.getRemoteSocketAddress().toString());
+                    boolean inputEnabled = (flags & 1) != 0;
+                    pointers = new PointerSender(out, () -> closePeer(socket), inputEnabled);
+                    inputWriter = new Thread(pointers, "ReDisplay-Pointer");
+                    inputWriter.start();
+                    listener.onConnected(inputEnabled);
                     trace = reserved == TRACE_V1;
                     final int telemetry = reserved;
                     reporter = new Thread(() -> report(socket, out, received, telemetry), "ReDisplay-Telemetry");
@@ -193,7 +223,11 @@ public class NetworkServer implements Runnable {
                             lastIdrRequest = now;
                         }
                     }
-                } else if (type == PING && size == 0) {
+                } else if (configured && type == INPUT_MODE && size == 0 && flags <= 1 && timestampUs > 0) {
+                    pointers.setMode(flags == 1, timestampUs);
+                    sendBytes(out, INPUT_MODE, flags, timestampUs, new byte[0]);
+                    listener.onInputModeChanged(flags == 1);
+                } else if (configured && type == PING && size == 0) {
                     if (trace) {
                         long receiveUs = System.nanoTime() / 1000;
                         synchronized (out) {
@@ -207,8 +241,20 @@ public class NetworkServer implements Runnable {
                 } else {
                     throw new IOException("Invalid packet type/size: " + type + "/" + size);
                 }
+                lastPacketMs = SystemClock.elapsedRealtime();
             }
         } finally {
+            PointerSender sender = pointers;
+            pointers = null;
+            if (sender != null) sender.close();
+            closePeer(socket);
+            if (inputWriter != null) {
+                try { inputWriter.join(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+            if (configured) {
+                decoder.endStream();
+                if (running) listener.onDisconnected();
+            }
             if (reporter != null) {
                 reporter.interrupt();
                 try { socket.close(); } catch (IOException ignored) {}
@@ -217,14 +263,14 @@ public class NetworkServer implements Runnable {
         }
     }
 
-    private void report(Socket socket, DataOutputStream out, ReceivedVideo received, int telemetryVersion) {
+    private void report(LocalSocket socket, DataOutputStream out, ReceivedVideo received, int telemetryVersion) {
         boolean trace = telemetryVersion == TRACE_V1;
         boolean telemetry = trace || telemetryVersion == TELEMETRY_V1;
         long lastTime = SystemClock.elapsedRealtime();
         long lastReceived = 0, lastBytes = 0, lastDecoded = 0, lastSubmitted = 0;
         try {
             if (telemetry) sendControl(out, CLIENT_INFO, 0, describeDevice());
-            while (!socket.isClosed()) {
+            while (running && !Thread.currentThread().isInterrupted()) {
                 Thread.sleep(1000);
                 long now = SystemClock.elapsedRealtime();
                 long windowMs = now - lastTime;
@@ -250,10 +296,10 @@ public class NetworkServer implements Runnable {
                             .put("decodedFrames", decoderStats.decoded).put("surfaceFrames", decoderStats.submitted)
                             .put("inputDrops", decoderStats.inputDrops).put("abandonedFrames", decoderStats.abandoned)
                             .put("pendingFrames", decoderStats.pending).put("pendingPeak", decoderStats.pendingPeak)
-                            .put("decode", decode).put("surfaceGap", surface);
+                            .put("decode", decode).put("surfaceGap", surface)
+                            .put("inputWait", timing(decoderStats.inputWait)).put("codecResidence", timing(decoderStats.residence));
                     Display.Mode mode = displayMode();
                     if (mode != null) {
-                        decoder.setPanelRefreshRate(mode.getRefreshRate());
                         stats.put("displayHz", mode.getRefreshRate());
                     }
                     sendControl(out, CLIENT_STATS, 0, stats);
@@ -330,14 +376,17 @@ public class NetworkServer implements Runnable {
         sendBytes(out, type, timestampUs, json == null ? new byte[0] : json.toString().getBytes(StandardCharsets.UTF_8));
     }
 
-    private void sendBytes(DataOutputStream out, int type, long timestampUs, byte[] payload) throws IOException {
+    static void sendBytes(DataOutputStream out, int type, long timestampUs, byte[] payload) throws IOException {
+        sendBytes(out, type, 0, timestampUs, payload);
+    }
+
+    private static void sendBytes(DataOutputStream out, int type, int flags, long timestampUs, byte[] payload) throws IOException {
         if (payload.length > MAX_CONTROL_BYTES) throw new IOException("Control message too large");
         ByteBuffer message = ByteBuffer.allocate(20 + payload.length);
-        message.putInt(MAGIC).put((byte) type).put((byte) 0).putShort((short) 0)
+        message.putInt(MAGIC).put((byte) type).put((byte) flags).putShort((short) 0)
                 .putLong(timestampUs).putInt(payload.length).put(payload);
         synchronized (out) {
             out.write(message.array());
-            out.flush();
         }
     }
 }
